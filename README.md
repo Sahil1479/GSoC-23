@@ -1,3 +1,4 @@
+
 # GSoC-23
 Work I did as a part of Google Summer of Code in 2023 at PostgreSQL.
 
@@ -35,19 +36,19 @@ Current method that is used to display tooltips involves inserting a new element
 
   All the features are split into 4 different tabs with the following grouping:
 	1. **Summary**
-		  - OS information
-			 Tabular representation of the following OS properties.
+		  - OS information </br> 
+			Tabular representation of the following OS properties.
 		    > - Name
 			> - Version
 			> - Host name
 			> - Domain name
 			> - Architecture
 			> - OS up since seconds
-		  - Handle & process count graph
+		  - Handle & process count graph </br> 
 		     Streaming line chart to show changes in handle and process count over time.
 		     > - Handle count: Number of object handles that are currently open in the operating system. 
 		     > - Process count: Number of processes that are currently running on the operating system.
-		  - CPU Information
+		  - CPU Information </br> 
 		      Tabular representation of the following CPU properties.
 		      > - Vendor
 		      > - Description
@@ -60,35 +61,35 @@ Current method that is used to display tooltips involves inserting a new element
 		      > - L2 cache size
 		      > - L3 cache size
    2. **CPU**
-         - CPU Usage Information
+         - CPU Usage Information </br> 
 	         Streaming line chart to show changes in CPU usage over time. Values are a percentage of time spent by CPUs for all operations.
 	         Following modes are covered:
 	         > - User mode normal
 	         > - User mode niced
 	         > - Kernal mode
 	         > - Idle mode
-         - Load Avg Information
+         - Load Avg Information </br> 
 	         Streaming line chart to show changes in the average load of the system over 1, 5, 10 and 15 minute intervals over time. 
-         - Process CPU usage
+         - Process CPU usage </br> 
 	         Tabular representation of the CPU usage per process with the options to filter and sort.
 	         > - Process ID
 	         > - Process name
 	         > - CPU usage value
     3. **Memory**
-         - Memory Information
-	         Streaming line chart to show changes in the memory usage.
+         - Memory Information </br> 
+	         Streaming line chart to show changes in the memory usage. </br> 
 	         Both Main and Swap memory are covered with following categories.
 	         > - Total memory available
 	         > - Used memory
 	         > - Free memory
-         - Process memory usage
+         - Process memory usage </br> 
 	         Tabular representation of the memory usage per process with the options to filter and sort.
 	          > - Process ID
 	         > - Process name
 	         > - Memory usage in bytes
 	         > - Total memory used in bytes
     4. **Storage**
-         - Disk Information
+         - Disk Information </br> 
 	         Tabular representation of the following properties for all the drive partitions.
 	         > - File system
 	         > - File system type
@@ -102,8 +103,9 @@ Current method that is used to display tooltips involves inserting a new element
 	         > - Free inodes
 	         
 	         Graphical representation of Total space using a Pie chart and Stacked Bar chart for Used and Available space
-         - I/O Analysis Information
+         - I/O Analysis Information </br> 
 	         Streaming line chart to show changes in the total number of operations, bytes transferred, and time spent in milliseconds for reading and writing over time for each disk. 
+
 - **Provided option to configure the refresh rates for the API calls** `(File > Preferences > Dashboards > Refresh rates)`
 
 - **SQL queries**
