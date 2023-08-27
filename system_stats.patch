@@ -1,0 +1,3855 @@
+From 929d8f1ed0bcce78db795fe7cab9484c4e610a13 Mon Sep 17 00:00:00 2001
+From: Sahil Harpal <santosh.2@iitj.ac.in>
+Date: Wed, 16 Aug 2023 15:19:15 +0530
+Subject: [PATCH 1/4] System stats changes except process and disk information
+
+---
+ web/pgadmin/dashboard/__init__.py             | 131 ++++++
+ web/pgadmin/dashboard/static/js/Dashboard.jsx | 234 +++++++---
+ .../dashboard/static/js/SystemStats/CPU.jsx   | 377 ++++++++++++++++
+ .../static/js/SystemStats/Memory.jsx          | 372 +++++++++++++++
+ .../static/js/SystemStats/Storage.jsx         | 329 ++++++++++++++
+ .../static/js/SystemStats/Summary.jsx         | 422 ++++++++++++++++++
+ .../sql/default/system_statistics.sql         | 100 +++++
+ .../js/components/PgChart/DonutChart.jsx      |  70 +++
+ .../js/components/PgChart/StreamingChart.jsx  | 146 ++++--
+ 9 files changed, 2090 insertions(+), 91 deletions(-)
+ create mode 100644 web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+ create mode 100644 web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+ create mode 100644 web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+ create mode 100644 web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+ create mode 100644 web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
+ create mode 100644 web/pgadmin/static/js/components/PgChart/DonutChart.jsx
+
+diff --git a/web/pgadmin/dashboard/__init__.py b/web/pgadmin/dashboard/__init__.py
+index 1dac54e74..c18f5d3de 100644
+--- a/web/pgadmin/dashboard/__init__.py
++++ b/web/pgadmin/dashboard/__init__.py
+@@ -112,6 +112,72 @@ class DashboardModule(PgAdminModule):
+             help_str=help_string
+         )
+ 
++        self.hpc_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'hpc_stats_refresh',
++            gettext("Handle & Process count statistics refresh rate"),
++            'integer', 5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.cu_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'cu_stats_refresh',
++            gettext(
++                "Percentage of CPU time used by different process \
++                modes statistics refresh rate"
++            ), 'integer', 5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.la_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'la_stats_refresh',
++            gettext("Average load statistics refresh rate"), 'integer',
++            5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.pcu_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'pcu_stats_refresh',
++            gettext("CPU usage per process statistics refresh rate"),
++            'integer', 5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.m_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'm_stats_refresh',
++            gettext("Memory usage statistics refresh rate"), 'integer',
++            5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.sm_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'sm_stats_refresh',
++            gettext("Swap memory usage statistics refresh rate"), 'integer',
++            5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.pmu_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'pmu_stats_refresh',
++            gettext("Memory usage per process statistics refresh rate"),
++            'integer', 5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
++        self.io_stats_refresh = self.dashboard_preference.register(
++            'dashboards', 'io_stats_refresh',
++            gettext("I/O analysis statistics refresh rate"), 'integer',
++            5, min_val=1, max_val=999999,
++            category_label=PREF_LABEL_REFRESH_RATES,
++            help_str=help_string
++        )
++
+         self.display_graphs = self.dashboard_preference.register(
+             'display', 'show_graphs',
+             gettext("Show graphs?"), 'boolean', True,
+@@ -197,6 +263,12 @@ class DashboardModule(PgAdminModule):
+             'dashboard.get_prepared_by_database_id',
+             'dashboard.config',
+             'dashboard.get_config_by_server_id',
++            'dashboard.check_system_statistics',
++            'dashboard.check_system_statistics_sid',
++            'dashboard.check_system_statistics_did',
++            'dashboard.system_statistics',
++            'dashboard.system_statistics_sid',
++            'dashboard.system_statistics_did',
+         ]
+ 
+ 
+@@ -536,3 +608,62 @@ def terminate_session(sid=None, did=None, pid=None):
+         response=gettext("Success") if res else gettext("Failed"),
+         status=200
+     )
++
++
++# To check whether system stats extesion is present or not
++@blueprint.route('check_extension/system_statistics',
++                 endpoint='check_system_statistics', methods=['GET'])
++@blueprint.route('check_extension/system_statistics/<int:sid>',
++                 endpoint='check_system_statistics_sid', methods=['GET'])
++@blueprint.route('check_extension/system_statistics/<int:sid>/<int:did>',
++                 endpoint='check_system_statistics_did', methods=['GET'])
++@login_required
++@check_precondition
++def check_system_statistics(sid=None, did=None):
++    sql = "SELECT * FROM pg_extension WHERE extname = 'system_stats';"
++    status, res = g.conn.execute_scalar(sql)
++    if not status:
++        return internal_server_error(errormsg=res)
++    data = {}
++    if res is not None:
++        data['ss_present'] = True
++    else:
++        data['ss_present'] = False
++    return ajax_response(
++        response=data,
++        status=200
++    )
++
++
++# System Statistics Backend
++@blueprint.route('/system_statistics',
++                 endpoint='system_statistics', methods=['GET'])
++@blueprint.route('/system_statistics/<int:sid>',
++                 endpoint='system_statistics_sid', methods=['GET'])
++@blueprint.route('/system_statistics/<int:sid>/<int:did>',
++                 endpoint='system_statistics_did', methods=['GET'])
++@login_required
++@check_precondition
++def system_statistics(sid=None, did=None):
++    resp_data = {}
++
++    if request.args['chart_names'] != '':
++        chart_names = request.args['chart_names'].split(',')
++
++        if not sid:
++            return internal_server_error(errormsg='Server ID not specified.')
++
++        sql = render_template(
++            "/".join([g.template_path, 'system_statistics.sql']), did=did,
++            chart_names=chart_names,
++        )
++        status, res = g.conn.execute_dict(sql)
++
++        for chart_row in res['rows']:
++            resp_data[chart_row['chart_name']] = json.loads(
++                chart_row['chart_data'])
++
++    return ajax_response(
++        response=resp_data,
++        status=200
++    )
+diff --git a/web/pgadmin/dashboard/static/js/Dashboard.jsx b/web/pgadmin/dashboard/static/js/Dashboard.jsx
+index 7194fcc10..e6afeff07 100644
+--- a/web/pgadmin/dashboard/static/js/Dashboard.jsx
++++ b/web/pgadmin/dashboard/static/js/Dashboard.jsx
+@@ -29,6 +29,10 @@ import _ from 'lodash';
+ import CachedOutlinedIcon from '@material-ui/icons/CachedOutlined';
+ import EmptyPanelMessage from '../../../static/js/components/EmptyPanelMessage';
+ import TabPanel from '../../../static/js/components/TabPanel';
++import Summary from 'SystemStats/Summary';
++import CPU from 'SystemStats/CPU';
++import Memory from 'SystemStats/Memory';
++import Storage from 'SystemStats/Storage';
+ 
+ function parseData(data) {
+   let res = [];
+@@ -148,12 +152,21 @@ export default function Dashboard({
+ }) {
+   const classes = useStyles();
+   let tabs = [gettext('Sessions'), gettext('Locks'), gettext('Prepared Transactions')];
++  let mainTabs = [gettext('General'), gettext('System Statistics')];
++  let systemStatsTabs = [gettext('Summary'), gettext('CPU'), gettext('Memory'), gettext('Storage')];
+   const [dashData, setdashData] = useState([]);
+   const [msg, setMsg] = useState('');
++  const [ssMsg, setSsMsg] = useState('');
+   const [tabVal, setTabVal] = useState(0);
++  const [mainTabVal, setmainTabVal] = useState(0);
+   const [refresh, setRefresh] = useState(false);
+   const [activeOnly, setActiveOnly] = useState(false);
+   const [schemaDict, setSchemaDict] = React.useState({});
++  const [systemStatsTabVal, setSystemStatsTabVal] = useState(0);
++
++  const systemStatsTabChanged = (e, tabVal) => {
++    setSystemStatsTabVal(tabVal);
++  };
+ 
+   if (!did) {
+     tabs.push(gettext('Configuration'));
+@@ -163,6 +176,10 @@ export default function Dashboard({
+     setTabVal(tabVal);
+   };
+ 
++  const mainTabChanged = (e, tabVal) => {
++    setmainTabVal(tabVal);
++  };
++
+   const serverConfigColumns = [
+     {
+       accessor: 'name',
+@@ -745,6 +762,7 @@ export default function Dashboard({
+ 
+   useEffect(() => {
+     let url,
++      ss_extension_check_url = url_for('dashboard.check_system_statistics'),
+       message = gettext(
+         'Please connect to the selected server to view the dashboard.'
+       );
+@@ -770,6 +788,10 @@ export default function Dashboard({
+       if (did) url += sid + '/' + did;
+       else url += sid;
+ 
++      if (did && !props.dbConnected) return;
++      if (did) ss_extension_check_url += '/' + sid + '/' + did;
++      else ss_extension_check_url += '/' + sid;
++
+       const api = getApiInstance();
+       if (node) {
+         api({
+@@ -787,6 +809,20 @@ export default function Dashboard({
+             // show failed message.
+             setMsg(gettext('Failed to retrieve data from the server.'));
+           });
++
++        api({
++          url: ss_extension_check_url,
++          type: 'GET',
++        })
++          .then((res) => {
++            const data = res.data;
++            if(data['ss_present'] == false){
++              setSsMsg(gettext('System stats extension is not installed. You can install the extension in a database using the "CREATE EXTENSION system_stats;" SQL command. Reload the pgAdmin once you installed.'));
++            }
++          })
++          .catch(() => {
++            setSsMsg(gettext('Failed to verify the presence of system stats extension.'));
++          });
+       } else {
+         setMsg(message);
+       }
+@@ -867,68 +903,148 @@ export default function Dashboard({
+       {sid && props.serverConnected ? (
+         <Box className={classes.dashboardPanel}>
+           <Box className={classes.emptyPanel}>
+-            {!_.isUndefined(preferences) && preferences.show_graphs && (
+-              <Graphs
+-                key={sid + did}
+-                preferences={preferences}
+-                sid={sid}
+-                did={did}
+-                pageVisible={props.panelVisible}
+-              ></Graphs>
+-            )}
+-            {!_.isUndefined(preferences) && preferences.show_activity && (
+-              <Box className={classes.panelContent}>
+-                <Box
+-                  className={classes.cardHeader}
+-                  title={props.dbConnected ?  gettext('Database activity') : gettext('Server activity')}
+-                >
+-                  {props.dbConnected ?  gettext('Database activity') : gettext('Server activity')}{' '}
++            <Box className={classes.panelContent}>
++              <Box height="100%" display="flex" flexDirection="column">
++                <Box>
++                  <Tabs
++                    value={mainTabVal}
++                    onChange={mainTabChanged}
++                  >
++                    {mainTabs.map((tabValue) => {
++                      return <Tab key={tabValue} label={tabValue} />;
++                    })}
++                    <RefreshButton/>
++                  </Tabs>
+                 </Box>
+-                <Box height="100%" display="flex" flexDirection="column">
+-                  <Box>
+-                    <Tabs
+-                      value={tabVal}
+-                      onChange={tabChanged}
+-                    >
+-                      {tabs.map((tabValue) => {
+-                        return <Tab key={tabValue} label={tabValue} />;
+-                      })}
+-                      <RefreshButton/>
+-                    </Tabs>
++                {/* General Statistics */}
++                <TabPanel value={mainTabVal} index={0} classNameRoot={classes.tabPanel}>
++                  {!_.isUndefined(preferences) && preferences.show_graphs && (
++                    <Graphs
++                      key={sid + did}
++                      preferences={preferences}
++                      sid={sid}
++                      did={did}
++                      pageVisible={props.panelVisible}
++                    ></Graphs>
++                  )}
++                  {!_.isUndefined(preferences) && preferences.show_activity && (
++                    <Box className={classes.panelContent}>
++                      <Box
++                        className={classes.cardHeader}
++                        title={props.dbConnected ?  gettext('Database activity') : gettext('Server activity')}
++                      >
++                        {props.dbConnected ?  gettext('Database activity') : gettext('Server activity')}{' '}
++                      </Box>
++                      <Box height="100%" display="flex" flexDirection="column">
++                        <Box>
++                          <Tabs
++                            value={tabVal}
++                            onChange={tabChanged}
++                          >
++                            {tabs.map((tabValue) => {
++                              return <Tab key={tabValue} label={tabValue} />;
++                            })}
++                            <RefreshButton/>
++                          </Tabs>
++                        </Box>
++                        <TabPanel value={tabVal} index={0} classNameRoot={classes.tabPanel}>
++                          <PgTable
++                            caveTable={false}
++                            CustomHeader={CustomActiveOnlyHeader}
++                            columns={activityColumns}
++                            data={filteredDashData}
++                            schema={schemaDict}
++                          ></PgTable>
++                        </TabPanel>
++                        <TabPanel value={tabVal} index={1} classNameRoot={classes.tabPanel}>
++                          <PgTable
++                            caveTable={false}
++                            columns={databaseLocksColumns}
++                            data={dashData}
++                          ></PgTable>
++                        </TabPanel>
++                        <TabPanel value={tabVal} index={2} classNameRoot={classes.tabPanel}>
++                          <PgTable
++                            caveTable={false}
++                            columns={databasePreparedColumns}
++                            data={dashData}
++                          ></PgTable>
++                        </TabPanel>
++                        <TabPanel value={tabVal} index={3} classNameRoot={classes.tabPanel}>
++                          <PgTable
++                            caveTable={false}
++                            columns={serverConfigColumns}
++                            data={dashData}
++                          ></PgTable>
++                        </TabPanel>
++                      </Box>
++                    </Box>
++                  )}
++                </TabPanel>
++                {/* System Statistics */}
++                <TabPanel value={mainTabVal} index={1} classNameRoot={classes.tabPanel}>
++                  <Box height="100%" display="flex" flexDirection="column">
++                    {ssMsg === '' ?
++                      <>
++                        <Box>
++                          <Tabs
++                            value={systemStatsTabVal}
++                            onChange={systemStatsTabChanged}
++                          >
++                            {systemStatsTabs.map((tabValue) => {
++                              return <Tab key={tabValue} label={tabValue} />;
++                            })}
++                          </Tabs>
++                        </Box>
++                        <TabPanel value={systemStatsTabVal} index={0} classNameRoot={classes.tabPanel}>
++                          <Summary
++                            key={sid + did}
++                            preferences={preferences}
++                            sid={sid}
++                            did={did}
++                            pageVisible={props.panelVisible}
++                            serverConnected={props.serverConnected}
++                          />
++                        </TabPanel>
++                        <TabPanel value={systemStatsTabVal} index={1} classNameRoot={classes.tabPanel}>
++                          <CPU
++                            key={sid + did}
++                            preferences={preferences}
++                            sid={sid}
++                            did={did}
++                            pageVisible={props.panelVisible}
++                            serverConnected={props.serverConnected}
++                          />
++                        </TabPanel>
++                        <TabPanel value={systemStatsTabVal} index={2} classNameRoot={classes.tabPanel}>
++                          <Memory
++                            key={sid + did}
++                            preferences={preferences}
++                            sid={sid}
++                            did={did}
++                            pageVisible={props.panelVisible}
++                            serverConnected={props.serverConnected}
++                          />
++                        </TabPanel>
++                        <TabPanel value={systemStatsTabVal} index={3} classNameRoot={classes.tabPanel}>
++                          <Storage
++                            key={sid + did}
++                            preferences={preferences}
++                            sid={sid}
++                            did={did}
++                            pageVisible={props.panelVisible}
++                            serverConnected={props.serverConnected}
++                          />
++                        </TabPanel>
++                      </> :
++                      <div className={classes.emptyPanel}>
++                        <EmptyPanelMessage text={ssMsg}/>
++                      </div>
++                    }
+                   </Box>
+-                  <TabPanel value={tabVal} index={0} classNameRoot={classes.tabPanel}>
+-                    <PgTable
+-                      caveTable={false}
+-                      CustomHeader={CustomActiveOnlyHeader}
+-                      columns={activityColumns}
+-                      data={filteredDashData}
+-                      schema={schemaDict}
+-                    ></PgTable>
+-                  </TabPanel>
+-                  <TabPanel value={tabVal} index={1} classNameRoot={classes.tabPanel}>
+-                    <PgTable
+-                      caveTable={false}
+-                      columns={databaseLocksColumns}
+-                      data={dashData}
+-                    ></PgTable>
+-                  </TabPanel>
+-                  <TabPanel value={tabVal} index={2} classNameRoot={classes.tabPanel}>
+-                    <PgTable
+-                      caveTable={false}
+-                      columns={databasePreparedColumns}
+-                      data={dashData}
+-                    ></PgTable>
+-                  </TabPanel>
+-                  <TabPanel value={tabVal} index={3} classNameRoot={classes.tabPanel}>
+-                    <PgTable
+-                      caveTable={false}
+-                      columns={serverConfigColumns}
+-                      data={dashData}
+-                    ></PgTable>
+-                  </TabPanel>
+-                </Box>
++                </TabPanel>
+               </Box>
+-            )}
++            </Box>
+           </Box>
+         </Box>
+       ) : showDefaultContents() }
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+new file mode 100644
+index 000000000..276034d9e
+--- /dev/null
++++ b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+@@ -0,0 +1,377 @@
++/////////////////////////////////////////////////////////////
++//
++// pgAdmin 4 - PostgreSQL Tools
++//
++// Copyright (C) 2013 - 2023, The pgAdmin Development Team
++// This software is released under the PostgreSQL Licence
++//
++//////////////////////////////////////////////////////////////
++// eslint-disable-next-line react/display-name
++import React, { useState, useEffect, useRef, useReducer, useMemo } from 'react';
++import PgTable from 'sources/components/PgTable';
++import gettext from 'sources/gettext';
++import PropTypes from 'prop-types';
++import { makeStyles } from '@material-ui/core/styles';
++import url_for from 'sources/url_for';
++import {getGCD, getEpoch} from 'sources/utils';
++import {ChartContainer} from '../Dashboard';
++import { Grid } from '@material-ui/core';
++import { DATA_POINT_SIZE } from 'sources/chartjs';
++import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
++import {useInterval, usePrevious} from 'sources/custom_hooks';
++import axios from 'axios';
++
++export const X_AXIS_LENGTH = 75;
++
++const useStyles = makeStyles((theme) => ({
++  autoResizer: {
++    height: '100% !important',
++    width: '100% !important',
++    background: theme.palette.grey[400],
++    padding: '7.5px',
++    overflowX: 'auto !important',
++    overflowY: 'hidden !important',
++    minHeight: '100%',
++    minWidth: '100%',
++  },
++  container: {
++    height: 'auto',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  fixedContainer: {
++    height: '577px',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  containerHeader: {
++    fontSize: '16px',
++    fontWeight: 'bold',
++    marginBottom: '5px',
++  }
++}));
++
++export function formatBytes(bytes) {
++  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
++  let unitIndex = 0;
++
++  while (bytes >= 1024 && unitIndex < units.length - 1) {
++    bytes /= 1024;
++    unitIndex++;
++  }
++
++  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
++}
++
++export function transformData(labels, refreshRate) {
++  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
++  let datasets = Object.keys(labels).map((label, i)=>{
++    return {
++      label: label,
++      data: labels[label] || [],
++      borderColor: colors[i],
++      pointHitRadius: DATA_POINT_SIZE,
++    };
++  }) || [];
++
++  return {
++    datasets: datasets,
++    refreshRate: refreshRate,
++  };
++}
++
++/* URL for fetching graphs data */
++export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
++  let base_url = url_for('dashboard.system_statistics');
++  base_url += '/' + sid;
++  base_url += (did > 0) ? ('/' + did) : '';
++  base_url += '?chart_names=' + chart_names.join(',');
++
++  return base_url;
++}
++
++/* This will process incoming charts data add it the previous charts
++ * data to get the new state.
++ */
++export function statsReducer(state, action) {
++
++  if(action.reset) {
++    return action.reset;
++  }
++
++  if(!action.incoming) {
++    return state;
++  }
++
++  if(!action.counterData) {
++    action.counterData = action.incoming;
++  }
++
++  let newState = {};
++  Object.keys(action.incoming).forEach(label => {
++    if(state[label]) {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++        ...state[label].slice(0, X_AXIS_LENGTH-1),
++      ];
++    } else {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++      ];
++    }
++  });
++  return newState;
++}
++
++const chartsDefault = {
++  'cu_stats': {'User Normal': [], 'User Niced': [], 'Kernel': [], 'Idle': []},
++  'la_stats': {'1 min': [], '5 mins': [], '10 mins': [], '15 mins': []},
++  'pcu_stats': {},
++};
++
++export default function CPU({preferences, sid, did, pageVisible, enablePoll=true}) {
++  const refreshOn = useRef(null);
++  const prevPrefernces = usePrevious(preferences);
++
++  const [cpuUsageInfo, cpuUsageInfoReduce] = useReducer(statsReducer, chartsDefault['cu_stats']);
++  const [loadAvgInfo, loadAvgInfoReduce] = useReducer(statsReducer, chartsDefault['la_stats']);
++  const [processCpuUsageStats, setProcessCpuUsageStats] = useState([]);
++
++  const [, setCounterData] = useState({});
++
++  const [pollDelay, setPollDelay] = useState(5000);
++
++  const [errorMsg, setErrorMsg] = useState(null);
++  const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
++
++  const tableHeader = [
++    {
++      Header: 'PID',
++      accessor: 'pid',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'Name',
++      accessor: 'name',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'CPU Usage',
++      accessor: 'cpu_usage',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++  ];
++
++  useEffect(()=>{
++    let calcPollDelay = false;
++    if(prevPrefernces) {
++      if(prevPrefernces['cu_stats_refresh'] != preferences['cu_stats_refresh']) {
++        cpuUsageInfoReduce({reset: chartsDefault['cu_stats']});
++        calcPollDelay = true;
++      }
++      if(prevPrefernces['la_stats_refresh'] != preferences['la_stats_refresh']) {
++        loadAvgInfoReduce({reset: chartsDefault['la_stats']});
++        calcPollDelay = true;
++      }
++      if(prevPrefernces['pcu_stats_refresh'] != preferences['pcu_stats_refresh']) {
++        setProcessCpuUsageStats({reset: chartsDefault['pcu_stats']});
++        calcPollDelay = true;
++      }
++    } else {
++      calcPollDelay = true;
++    }
++    if(calcPollDelay) {
++      const keys = Object.keys(chartsDefault);
++      const length = keys.length;
++      if(length == 1){
++        setPollDelay(
++          preferences[keys[0]+'_refresh']*1000
++        );
++      } else {
++        setPollDelay(
++          getGCD(Object.keys(chartsDefault).map((name)=>preferences[name+'_refresh']))*1000
++        );
++      }
++    }
++  }, [preferences]);
++
++  useEffect(()=>{
++    /* Charts rendered are not visible when, the dashboard is hidden but later visible */
++    if(pageVisible && !chartDrawnOnce) {
++      setChartDrawnOnce(true);
++    }
++  }, [pageVisible]);
++
++  useInterval(()=>{
++    const currEpoch = getEpoch();
++    if(refreshOn.current === null) {
++      let tmpRef = {};
++      Object.keys(chartsDefault).forEach((name)=>{
++        tmpRef[name] = currEpoch;
++      });
++      refreshOn.current = tmpRef;
++    }
++
++    let getFor = [];
++    Object.keys(chartsDefault).forEach((name)=>{
++      if(currEpoch >= refreshOn.current[name]) {
++        getFor.push(name);
++        refreshOn.current[name] = currEpoch + preferences[name+'_refresh'];
++      }
++    });
++
++    let path = getStatsUrl(sid, did, getFor);
++    if (!pageVisible){
++      return;
++    }
++    axios.get(path)
++      .then((resp)=>{
++        let data = resp.data;
++        setErrorMsg(null);
++        if(data.hasOwnProperty('cu_stats')){
++          let new_cu_stats = {
++            'User Normal': data['cu_stats']['usermode_normal_process_percent']?data['cu_stats']['usermode_normal_process_percent']:0,
++            'User Niced': data['cu_stats']['usermode_niced_process_percent']?data['cu_stats']['usermode_niced_process_percent']:0,
++            'Kernel': data['cu_stats']['kernelmode_process_percent']?data['cu_stats']['kernelmode_process_percent']:0,
++            'Idle': data['cu_stats']['idle_mode_percent']?data['cu_stats']['idle_mode_percent']:0,
++          };
++          cpuUsageInfoReduce({incoming: new_cu_stats});
++        }
++
++        if(data.hasOwnProperty('la_stats')){
++          let new_la_stats = {
++            '1 min': data['la_stats']['load_avg_one_minute']?data['la_stats']['load_avg_one_minute']:0,
++            '5 mins': data['la_stats']['load_avg_five_minutes']?data['la_stats']['load_avg_five_minutes']:0,
++            '10 mins': data['la_stats']['load_avg_ten_minutes']?data['la_stats']['load_avg_ten_minutes']:0,
++            '15 mins': data['la_stats']['load_avg_fifteen_minutes']?data['la_stats']['load_avg_fifteen_minutes']:0,
++          };
++          loadAvgInfoReduce({incoming: new_la_stats});
++        }
++
++        if(data.hasOwnProperty('pcu_stats')){
++          let pcu_info_list = [];
++          const pcu_info_obj = data['pcu_stats'];
++          for (const key in pcu_info_obj) {
++            pcu_info_list.push({ icon: '', pid: pcu_info_obj[key]['pid'], name: pcu_info_obj[key]['name'], cpu_usage: formatBytes(pcu_info_obj[key]['cpu_usage']) });
++          }
++
++          setProcessCpuUsageStats(pcu_info_list);
++        }
++
++        setCounterData((prevCounterData)=>{
++          return {
++            ...prevCounterData,
++            ...data,
++          };
++        });
++      })
++      .catch((error)=>{
++        if(!errorMsg) {
++          cpuUsageInfoReduce({reset:chartsDefault['cu_stats']});
++          loadAvgInfoReduce({reset:chartsDefault['la_stats']});
++          setCounterData({});
++          if(error.response) {
++            if (error.response.status === 428) {
++              setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
++            } else {
++              setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
++            }
++          } else if(error.request) {
++            setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
++            return;
++          } else {
++            console.error(error);
++          }
++        }
++      });
++  }, enablePoll ? pollDelay : -1);
++
++  return (
++    <>
++      <div data-testid='graph-poll-delay' style={{display: 'none'}}>{pollDelay}</div>
++      {chartDrawnOnce &&
++        <CPUWrapper
++          cpuUsageInfo={transformData(cpuUsageInfo, preferences['cu_stats_refresh'])}
++          loadAvgInfo={transformData(loadAvgInfo, preferences['la_stats_refresh'])}
++          processCpuUsageStats={processCpuUsageStats}
++          tableHeader={tableHeader}
++          errorMsg={errorMsg}
++          showTooltip={preferences['graph_mouse_track']}
++          showDataPoints={preferences['graph_data_points']}
++          lineBorderWidth={preferences['graph_line_border_width']}
++          isDatabase={did > 0}
++          isTest={false}
++        />
++      }
++    </>
++  );
++}
++
++CPU.propTypes = {
++  preferences: PropTypes.object.isRequired,
++  sid: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  did: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  pageVisible: PropTypes.bool,
++  enablePoll: PropTypes.bool,
++};
++
++export function CPUWrapper(props) {
++  const classes = useStyles();
++  const options = useMemo(()=>({
++    showDataPoints: props.showDataPoints,
++    showTooltip: props.showTooltip,
++    lineBorderWidth: props.lineBorderWidth,
++  }), [props.showTooltip, props.showDataPoints, props.lineBorderWidth]);
++  return (
++    <>
++      <Grid container spacing={1} className={classes.container}>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('CPU Usage ()')}</div>
++          <ChartContainer id='cu-graph' title={gettext('')} datasets={props.cpuUsageInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <StreamingChart data={props.cpuUsageInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++          </ChartContainer>
++        </Grid>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('Load Average')}</div>
++          <ChartContainer id='la-graph' title={gettext('')} datasets={props.loadAvgInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <StreamingChart data={props.loadAvgInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++          </ChartContainer>
++        </Grid>
++      </Grid>
++      <Grid container spacing={1} className={classes.fixedContainer}>
++        <PgTable
++          className={classes.autoResizer}
++          columns={props.tableHeader}
++          data={props.processCpuUsageStats}
++          msg={props.errorMsg}
++          type={'panel'}
++        ></PgTable>
++      </Grid>
++    </>
++  );
++}
++
++const propTypeStats = PropTypes.shape({
++  datasets: PropTypes.array,
++  refreshRate: PropTypes.number.isRequired,
++});
++CPUWrapper.propTypes = {
++  cpuUsageInfo: propTypeStats.isRequired,
++  loadAvgInfo: propTypeStats.isRequired,
++  processCpuUsageStats: PropTypes.array.isRequired,
++  tableHeader: PropTypes.array.isRequired,
++  errorMsg: PropTypes.string,
++  showTooltip: PropTypes.bool.isRequired,
++  showDataPoints: PropTypes.bool.isRequired,
++  lineBorderWidth: PropTypes.number.isRequired,
++  isDatabase: PropTypes.bool.isRequired,
++  isTest: PropTypes.bool,
++};
+\ No newline at end of file
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+new file mode 100644
+index 000000000..74e8f424b
+--- /dev/null
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+@@ -0,0 +1,372 @@
++import React, { useState, useEffect, useRef, useReducer, useMemo } from 'react';
++import PgTable from 'sources/components/PgTable';
++import gettext from 'sources/gettext';
++import PropTypes from 'prop-types';
++import { makeStyles } from '@material-ui/core/styles';
++import url_for from 'sources/url_for';
++import {getGCD, getEpoch} from 'sources/utils';
++import {ChartContainer} from '../Dashboard';
++import { Grid } from '@material-ui/core';
++import { DATA_POINT_SIZE } from 'sources/chartjs';
++import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
++import {useInterval, usePrevious} from 'sources/custom_hooks';
++import axios from 'axios';
++
++export const X_AXIS_LENGTH = 75;
++
++const useStyles = makeStyles((theme) => ({
++  autoResizer: {
++    height: '100% !important',
++    width: '100% !important',
++    background: theme.palette.grey[400],
++    padding: '7.5px',
++    overflowX: 'auto !important',
++    overflowY: 'hidden !important',
++    minHeight: '100%',
++    minWidth: '100%',
++  },
++  container: {
++    height: 'auto',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  fixedContainer: {
++    height: '577px',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  containerHeader: {
++    fontSize: '16px',
++    fontWeight: 'bold',
++    marginBottom: '5px',
++  }
++}));
++
++export function formatBytes(bytes) {
++  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
++  let unitIndex = 0;
++
++  while (bytes >= 1024 && unitIndex < units.length - 1) {
++    bytes /= 1024;
++    unitIndex++;
++  }
++
++  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
++}
++
++export function transformData(labels, refreshRate) {
++  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
++  let datasets = Object.keys(labels).map((label, i)=>{
++    return {
++      label: label,
++      data: labels[label] || [],
++      borderColor: colors[i],
++      pointHitRadius: DATA_POINT_SIZE,
++    };
++  }) || [];
++
++  return {
++    datasets: datasets,
++    refreshRate: refreshRate,
++  };
++}
++
++/* URL for fetching graphs data */
++export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
++  let base_url = url_for('dashboard.system_statistics');
++  base_url += '/' + sid;
++  base_url += (did > 0) ? ('/' + did) : '';
++  base_url += '?chart_names=' + chart_names.join(',');
++
++  return base_url;
++}
++
++/* This will process incoming charts data add it the previous charts
++ * data to get the new state.
++ */
++export function statsReducer(state, action) {
++
++  if(action.reset) {
++    return action.reset;
++  }
++
++  if(!action.incoming) {
++    return state;
++  }
++
++  if(!action.counterData) {
++    action.counterData = action.incoming;
++  }
++
++  let newState = {};
++  Object.keys(action.incoming).forEach(label => {
++    if(state[label]) {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++        ...state[label].slice(0, X_AXIS_LENGTH-1),
++      ];
++    } else {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++      ];
++    }
++  });
++  return newState;
++}
++
++const chartsDefault = {
++  'm_stats': {'Total': [], 'Used': [], 'Free': []},
++  'sm_stats': {'Total': [], 'Used': [], 'Free': []},
++  'pmu_stats': {},
++};
++
++export default function Memory({preferences, sid, did, pageVisible, enablePoll=true}) {
++  const refreshOn = useRef(null);
++  const prevPrefernces = usePrevious(preferences);
++
++  const [memoryUsageInfo, memoryUsageInfoReduce] = useReducer(statsReducer, chartsDefault['m_stats']);
++  const [swapMemoryUsageInfo, swapMemoryUsageInfoReduce] = useReducer(statsReducer, chartsDefault['sm_stats']);
++  const [processMemoryUsageStats, setProcessMemoryUsageStats] = useState([]);
++
++  const [, setCounterData] = useState({});
++
++  const [pollDelay, setPollDelay] = useState(5000);
++  const [errorMsg, setErrorMsg] = useState(null);
++  const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
++
++  const tableHeader = [
++    {
++      Header: 'PID',
++      accessor: 'pid',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'Name',
++      accessor: 'name',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'Memory Usage',
++      accessor: 'memory_usage',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'Memory Bytes',
++      accessor: 'memory_bytes',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++  ];
++
++  useEffect(()=>{
++    let calcPollDelay = false;
++    if(prevPrefernces) {
++      if(prevPrefernces['m_stats_refresh'] != preferences['m_stats_refresh']) {
++        memoryUsageInfoReduce({reset: chartsDefault['m_stats']});
++        calcPollDelay = true;
++      }
++      if(prevPrefernces['sm_stats_refresh'] != preferences['sm_stats_refresh']) {
++        swapMemoryUsageInfoReduce({reset: chartsDefault['sm_stats']});
++        calcPollDelay = true;
++      }
++      if(prevPrefernces['pmu_stats_refresh'] != preferences['pmu_stats_refresh']) {
++        setProcessMemoryUsageStats({reset: chartsDefault['pmu_stats']});
++        calcPollDelay = true;
++      }
++    } else {
++      calcPollDelay = true;
++    }
++    if(calcPollDelay) {
++      const keys = Object.keys(chartsDefault);
++      const length = keys.length;
++      if(length == 1){
++        setPollDelay(
++          preferences[keys[0]+'_refresh']*1000
++        );
++      } else {
++        setPollDelay(
++          getGCD(Object.keys(chartsDefault).map((name)=>preferences[name+'_refresh']))*1000
++        );
++      }
++    }
++  }, [preferences]);
++
++  useEffect(()=>{
++    /* Charts rendered are not visible when, the dashboard is hidden but later visible */
++    if(pageVisible && !chartDrawnOnce) {
++      setChartDrawnOnce(true);
++    }
++  }, [pageVisible]);
++
++  useInterval(()=>{
++    const currEpoch = getEpoch();
++    if(refreshOn.current === null) {
++      let tmpRef = {};
++      Object.keys(chartsDefault).forEach((name)=>{
++        tmpRef[name] = currEpoch;
++      });
++      refreshOn.current = tmpRef;
++    }
++
++    let getFor = [];
++    Object.keys(chartsDefault).forEach((name)=>{
++      if(currEpoch >= refreshOn.current[name]) {
++        getFor.push(name);
++        refreshOn.current[name] = currEpoch + preferences[name+'_refresh'];
++      }
++    });
++
++    let path = getStatsUrl(sid, did, getFor);
++    if (!pageVisible){
++      return;
++    }
++    axios.get(path)
++      .then((resp)=>{
++        let data = resp.data;
++        setErrorMsg(null);
++        if(data.hasOwnProperty('m_stats')){
++          let new_m_stats = {
++            'Total': data['m_stats']['total_memory']?data['m_stats']['total_memory']:0,
++            'Used': data['m_stats']['used_memory']?data['m_stats']['used_memory']:0,
++            'Free': data['m_stats']['free_memory']?data['m_stats']['free_memory']:0,
++          };
++          memoryUsageInfoReduce({incoming: new_m_stats});
++        }
++
++        if(data.hasOwnProperty('sm_stats')){
++          let new_sm_stats = {
++            'Total': data['sm_stats']['swap_total']?data['sm_stats']['swap_total']:0,
++            'Used': data['sm_stats']['swap_used']?data['sm_stats']['swap_used']:0,
++            'Free': data['sm_stats']['swap_free']?data['sm_stats']['swap_free']:0,
++          };
++          swapMemoryUsageInfoReduce({incoming: new_sm_stats});
++        }
++
++        if(data.hasOwnProperty('pmu_stats')){
++          let pmu_info_list = [];
++          const pmu_info_obj = data['pmu_stats'];
++          for (const key in pmu_info_obj) {
++            pmu_info_list.push({ icon: '', pid: pmu_info_obj[key]['pid'], name: pmu_info_obj[key]['name'], memory_usage: formatBytes(pmu_info_obj[key]['memory_usage']), memory_bytes: formatBytes(pmu_info_obj[key]['memory_bytes']) });
++          }
++
++          setProcessMemoryUsageStats(pmu_info_list);
++        }
++
++        setCounterData((prevCounterData)=>{
++          return {
++            ...prevCounterData,
++            ...data,
++          };
++        });
++      })
++      .catch((error)=>{
++        if(!errorMsg) {
++          memoryUsageInfoReduce({reset:chartsDefault['m_stats']});
++          swapMemoryUsageInfoReduce({reset:chartsDefault['sm_stats']});
++          setCounterData({});
++          if(error.response) {
++            if (error.response.status === 428) {
++              setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
++            } else {
++              setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
++            }
++          } else if(error.request) {
++            setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
++            return;
++          } else {
++            console.error(error);
++          }
++        }
++      });
++  }, enablePoll ? pollDelay : -1);
++  return (
++    <>
++      <div data-testid='graph-poll-delay' style={{display: 'none'}}>{pollDelay}</div>
++      {chartDrawnOnce &&
++        <MemoryWrapper
++          memoryUsageInfo={transformData(memoryUsageInfo, preferences['m_stats_refresh'])}
++          swapMemoryUsageInfo={transformData(swapMemoryUsageInfo, preferences['sm_stats_refresh'])}
++          processMemoryUsageStats={processMemoryUsageStats}
++          tableHeader={tableHeader}
++          errorMsg={errorMsg}
++          showTooltip={preferences['graph_mouse_track']}
++          showDataPoints={preferences['graph_data_points']}
++          lineBorderWidth={preferences['graph_line_border_width']}
++          isDatabase={did > 0}
++          isTest={false}
++        />
++      }
++    </>
++  );
++}
++
++Memory.propTypes = {
++  preferences: PropTypes.object.isRequired,
++  sid: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  did: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  pageVisible: PropTypes.bool,
++  enablePoll: PropTypes.bool,
++};
++
++export function MemoryWrapper(props) {
++  const classes = useStyles();
++  const options = useMemo(()=>({
++    showDataPoints: props.showDataPoints,
++    showTooltip: props.showTooltip,
++    lineBorderWidth: props.lineBorderWidth,
++  }), [props.showTooltip, props.showDataPoints, props.lineBorderWidth]);
++
++  return (
++    <>
++      <Grid container spacing={1} className={classes.container}>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('Memory')}</div>
++          <ChartContainer id='m-graph' title={gettext('')} datasets={props.memoryUsageInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <StreamingChart data={props.memoryUsageInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++          </ChartContainer>
++        </Grid>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('Swap Memory')}</div>
++          <ChartContainer id='sm-graph' title={gettext('')} datasets={props.swapMemoryUsageInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <StreamingChart data={props.swapMemoryUsageInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++          </ChartContainer>
++        </Grid>
++      </Grid>
++      <Grid container spacing={1} className={classes.fixedContainer}>
++        <PgTable
++          className={classes.autoResizer}
++          columns={props.tableHeader}
++          data={props.processMemoryUsageStats}
++          msg={props.errorMsg}
++          type={'panel'}
++        ></PgTable>
++      </Grid>
++    </>
++  );
++}
++
++const propTypeStats = PropTypes.shape({
++  datasets: PropTypes.array,
++  refreshRate: PropTypes.number.isRequired,
++});
++MemoryWrapper.propTypes = {
++  memoryUsageInfo: propTypeStats.isRequired,
++  swapMemoryUsageInfo: propTypeStats.isRequired,
++  processMemoryUsageStats: PropTypes.array.isRequired,
++  tableHeader: PropTypes.array.isRequired,
++  errorMsg: PropTypes.string,
++  showTooltip: PropTypes.bool.isRequired,
++  showDataPoints: PropTypes.bool.isRequired,
++  lineBorderWidth: PropTypes.number.isRequired,
++  isDatabase: PropTypes.bool.isRequired,
++  isTest: PropTypes.bool,
++};
+\ No newline at end of file
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+new file mode 100644
+index 000000000..2acb217bd
+--- /dev/null
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+@@ -0,0 +1,329 @@
++import React, { useState, useEffect, useRef, useReducer, useMemo } from 'react';
++import gettext from 'sources/gettext';
++import PropTypes from 'prop-types';
++import { makeStyles } from '@material-ui/core/styles';
++import url_for from 'sources/url_for';
++import {getGCD, getEpoch} from 'sources/utils';
++import {ChartContainer} from '../Dashboard';
++import { Grid } from '@material-ui/core';
++import { DATA_POINT_SIZE } from 'sources/chartjs';
++import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
++import {useInterval, usePrevious} from 'sources/custom_hooks';
++import axios from 'axios';
++
++export const X_AXIS_LENGTH = 75;
++
++const useStyles = makeStyles((theme) => ({
++  autoResizer: {
++    height: '100% !important',
++    width: '100% !important',
++    background: theme.palette.grey[400],
++    padding: '7.5px',
++    overflowX: 'auto !important',
++    overflowY: 'hidden !important',
++    minHeight: '100%',
++    minWidth: '100%',
++  },
++  container: {
++    height: 'auto',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  ioDiskContainer: {
++    height: 'auto',
++    background: theme.palette.grey[200],
++    padding: '10px',
++  },
++  fixedContainer: {
++    height: '577px',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  containerHeader: {
++    fontSize: '16px',
++    fontWeight: 'bold',
++    marginBottom: '5px',
++  },
++  chartHeader: {
++    fontSize: '14px',
++    fontWeight: 'bold',
++    marginBottom: '5px',
++  }
++}));
++
++export function transformData(labels, refreshRate) {
++  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
++  let datasets = Object.keys(labels).map((label, i)=>{
++    return {
++      label: label,
++      data: labels[label] || [],
++      borderColor: colors[i],
++      pointHitRadius: DATA_POINT_SIZE,
++    };
++  }) || [];
++
++  return {
++    datasets: datasets,
++    refreshRate: refreshRate,
++  };
++}
++
++/* URL for fetching graphs data */
++export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
++  let base_url = url_for('dashboard.system_statistics');
++  base_url += '/' + sid;
++  base_url += (did > 0) ? ('/' + did) : '';
++  base_url += '?chart_names=' + chart_names.join(',');
++
++  return base_url;
++}
++
++/* This will process incoming charts data add it the previous charts
++ * data to get the new state.
++ */
++export function ioStatsReducer(state, action) {
++
++  if(action.reset) {
++    return action.reset;
++  }
++
++  if(!action.incoming) {
++    return state;
++  }
++
++  if(!action.counterData) {
++    action.counterData = action.incoming;
++  }
++
++  let newState = {};
++  Object.keys(action.incoming).forEach(disk_stats => {
++    newState[disk_stats] = {};
++    Object.keys(action.incoming[disk_stats]).forEach(label => {
++      if(state[disk_stats][label]) {
++        newState[disk_stats][label] = [
++          action.counter ?  action.incoming[disk_stats][label] - action.counterData[disk_stats][label] : action.incoming[disk_stats][label],
++          ...state[disk_stats][label].slice(0, X_AXIS_LENGTH-1),
++        ];
++      } else {
++        newState[disk_stats][label] = [
++          action.counter ?  action.incoming[disk_stats][label] - action.counterData[disk_stats][label] : action.incoming[disk_stats][label],
++        ];
++      }
++    });
++  });
++  return newState;
++}
++
++const chartsDefault = {
++  'io_stats': {},
++};
++
++export default function Storage({preferences, sid, did, pageVisible, enablePoll=true}) {
++  const refreshOn = useRef(null);
++  const prevPrefernces = usePrevious(preferences);
++
++  const [ioInfo, ioInfoReduce] = useReducer(ioStatsReducer, chartsDefault['io_stats']);
++
++  const [, setCounterData] = useState({});
++
++  const [pollDelay, setPollDelay] = useState(5000);
++  const [errorMsg, setErrorMsg] = useState(null);
++  const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
++
++  useEffect(()=>{
++    let calcPollDelay = false;
++    if(prevPrefernces) {
++      if(prevPrefernces['io_stats_refresh'] != preferences['io_stats_refresh']) {
++        ioInfoReduce({reset: chartsDefault['io_stats']});
++        calcPollDelay = true;
++      }
++    } else {
++      calcPollDelay = true;
++    }
++    if(calcPollDelay) {
++      const keys = Object.keys(chartsDefault);
++      const length = keys.length;
++      if(length == 1){
++        setPollDelay(
++          preferences[keys[0]+'_refresh']*1000
++        );
++      } else {
++        setPollDelay(
++          getGCD(Object.keys(chartsDefault).map((name)=>preferences[name+'_refresh']))*1000
++        );
++      }
++    }
++  }, [preferences]);
++
++  useEffect(()=>{
++    /* Charts rendered are not visible when, the dashboard is hidden but later visible */
++    if(pageVisible && !chartDrawnOnce) {
++      setChartDrawnOnce(true);
++    }
++  }, [pageVisible]);
++
++  useInterval(()=>{
++    const currEpoch = getEpoch();
++    if(refreshOn.current === null) {
++      let tmpRef = {};
++      Object.keys(chartsDefault).forEach((name)=>{
++        tmpRef[name] = currEpoch;
++      });
++      refreshOn.current = tmpRef;
++    }
++
++    let getFor = [];
++    Object.keys(chartsDefault).forEach((name)=>{
++      if(currEpoch >= refreshOn.current[name]) {
++        getFor.push(name);
++        refreshOn.current[name] = currEpoch + preferences[name+'_refresh'];
++      }
++    });
++
++    let path = getStatsUrl(sid, did, getFor);
++    if (!pageVisible){
++      return;
++    }
++    axios.get(path)
++      .then((resp)=>{
++        let data = resp.data;
++        setErrorMsg(null);
++        if(data.hasOwnProperty('io_stats')){
++          const io_info_obj = data['io_stats'];
++          for (const disk in io_info_obj) {
++            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_total_rw`)){
++              chartsDefault.io_stats[`${disk}_total_rw`] = {'Read': [], 'Write': []};
++            }
++            if(!ioInfo.hasOwnProperty(`${disk}_total_rw`)){
++              ioInfo[`${disk}_total_rw`] = {'Read': [], 'Write': []};
++            }
++
++            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_bytes_rw`)){
++              chartsDefault.io_stats[`${disk}_bytes_rw`] = {'Read': [], 'Write': []};
++            }
++            if(!ioInfo.hasOwnProperty(`${disk}_bytes_rw`)){
++              ioInfo[`${disk}_bytes_rw`] = {'Read': [], 'Write': []};
++            }
++
++            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_time_rw`)){
++              chartsDefault.io_stats[`${disk}_time_rw`] = {'Read': [], 'Write': []};
++            }
++            if(!ioInfo.hasOwnProperty(`${disk}_time_rw`)){
++              ioInfo[`${disk}_time_rw`] = {'Read': [], 'Write': []};
++            }
++          }
++
++          let new_io_stats = {};
++          for (const disk in io_info_obj) {
++            new_io_stats[`${disk}_total_rw`] = {'Read': io_info_obj[`${disk}`]['total_reads']?io_info_obj[`${disk}`]['total_reads']:0, 'Write': io_info_obj[`${disk}`]['total_writes']?io_info_obj[`${disk}`]['total_writes']:0};
++            new_io_stats[`${disk}_bytes_rw`] = {'Read': io_info_obj[`${disk}`]['read_bytes']?io_info_obj[`${disk}`]['read_bytes']:0, 'Write': io_info_obj[`${disk}`]['write_bytes']?io_info_obj[`${disk}`]['write_bytes']:0};
++            new_io_stats[`${disk}_time_rw`] = {'Read': io_info_obj[`${disk}`]['read_time_ms']?io_info_obj[`${disk}`]['read_time_ms']:0, 'Write': io_info_obj[`${disk}`]['write_time_ms']?io_info_obj[`${disk}`]['write_time_ms']:0};
++          }
++          ioInfoReduce({incoming: new_io_stats});
++        }
++
++        setCounterData((prevCounterData)=>{
++          return {
++            ...prevCounterData,
++            ...data,
++          };
++        });
++      })
++      .catch((error)=>{
++        if(!errorMsg) {
++          ioInfoReduce({reset:chartsDefault['io_stats']});
++          setCounterData({});
++          if(error.response) {
++            if (error.response.status === 428) {
++              setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
++            } else {
++              setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
++            }
++          } else if(error.request) {
++            setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
++            return;
++          } else {
++            console.error(error);
++          }
++        }
++      });
++  }, enablePoll ? pollDelay : -1);
++
++  return (
++    <>
++      <div data-testid='graph-poll-delay' style={{display: 'none'}}>{pollDelay}</div>
++      {chartDrawnOnce &&
++        <StorageWrapper
++          ioInfo={ioInfo}
++          ioRefreshRate={preferences['io_stats_refresh']}
++          errorMsg={errorMsg}
++          showTooltip={preferences['graph_mouse_track']}
++          showDataPoints={preferences['graph_data_points']}
++          lineBorderWidth={preferences['graph_line_border_width']}
++          isDatabase={did > 0}
++          isTest={false}
++        />
++      }
++    </>
++  );
++}
++
++Storage.propTypes = {
++  preferences: PropTypes.object.isRequired,
++  sid: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  did: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  pageVisible: PropTypes.bool,
++  enablePoll: PropTypes.bool,
++};
++
++export function StorageWrapper(props) {
++  const classes = useStyles();
++  const options = useMemo(()=>({
++    showDataPoints: props.showDataPoints,
++    showTooltip: props.showTooltip,
++    lineBorderWidth: props.lineBorderWidth,
++  }), [props.showTooltip, props.showDataPoints, props.lineBorderWidth]);
++
++  const keys = Object.keys(props.ioInfo);
++  return (
++    <>
++      {keys.map((key, index) => (
++        index % 3 === 0 && (
++          <Grid key={`disk-${index}`} container spacing={1} className={classes.container}>
++            <Grid container spacing={1} className={classes.ioDiskContainer}>
++              <div className={classes.containerHeader}>{gettext(`Disk ${Math.floor(index / 3) + 1}`)}</div>
++            </Grid>
++            <Grid container spacing={1} className={classes.ioDiskContainer}>
++              {keys.slice(index, index + 3).map((innerKey, innerKeyIndex) => (
++                <Grid key={`${innerKey}`} item md={4} sm={6}>
++                  <div className={classes.chartHeader}>{innerKeyIndex==0 ? gettext('I/O Operations Count'): innerKeyIndex==1? gettext('Data Transfer (Bytes)'):gettext('Time Spent in I/O Operations (Milliseconds)')}</div>
++                  <ChartContainer id={`io-graph-${innerKey}`} title={gettext('')} datasets={transformData(props.ioInfo[innerKey], props.ioRefreshRate).datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++                    <StreamingChart data={transformData(props.ioInfo[innerKey], props.ioRefreshRate)} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++                  </ChartContainer>
++                </Grid>
++              ))}
++            </Grid>
++          </Grid>
++        )
++      ))}
++    </>
++  );
++}
++
++StorageWrapper.propTypes = {
++  ioInfo: PropTypes.objectOf(
++    PropTypes.shape({
++      Read: PropTypes.array,
++      Write: PropTypes.array,
++    })
++  ),
++  ioRefreshRate: PropTypes.number.isRequired,
++  errorMsg: PropTypes.string,
++  showTooltip: PropTypes.bool.isRequired,
++  showDataPoints: PropTypes.bool.isRequired,
++  lineBorderWidth: PropTypes.number.isRequired,
++  isDatabase: PropTypes.bool.isRequired,
++  isTest: PropTypes.bool,
++};
+\ No newline at end of file
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+new file mode 100644
+index 000000000..9b2ee9a30
+--- /dev/null
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+@@ -0,0 +1,422 @@
++import React, { useState, useEffect, useRef, useReducer, useMemo } from 'react';
++import gettext from 'sources/gettext';
++import PropTypes from 'prop-types';
++import { makeStyles } from '@material-ui/core/styles';
++import url_for from 'sources/url_for';
++import getApiInstance from 'sources/api_instance';
++import {getGCD, getEpoch} from 'sources/utils';
++import {ChartContainer} from '../Dashboard';
++import { Grid } from '@material-ui/core';
++import { DATA_POINT_SIZE } from 'sources/chartjs';
++import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
++import DonutChart from '../../../../static/js/components/PgChart/DonutChart';
++import {useInterval, usePrevious} from 'sources/custom_hooks';
++import axios from 'axios';
++
++export const X_AXIS_LENGTH = 75;
++
++const useStyles = makeStyles((theme) => ({
++  autoResizer: {
++    height: '100% !important',
++    width: '100% !important',
++    background: theme.palette.grey[400],
++    padding: '7.5px',
++    overflowX: 'auto !important',
++    overflowY: 'hidden !important',
++    minHeight: '100%',
++    minWidth: '100%',
++  },
++  table: {
++    width: '100%',
++    backgroundColor: theme.otherVars.tableBg,
++    border: '1px solid rgb(221, 224, 230)',
++  },
++  tableVal: {
++    border: '1px solid rgb(221, 224, 230) !important',
++    padding: '10px !important',
++  },
++  container: {
++    height: 'auto',
++    background: theme.palette.grey[200],
++    padding: '10px',
++    marginBottom: '30px',
++  },
++  containerHeader: {
++    fontSize: '16px',
++    fontWeight: 'bold',
++    marginBottom: '5px',
++  },
++}));
++
++export function transformData(labels, refreshRate) {
++  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
++  let datasets = Object.keys(labels).map((label, i)=>{
++    return {
++      label: label,
++      data: labels[label] || [],
++      borderColor: colors[i],
++      pointHitRadius: DATA_POINT_SIZE,
++    };
++  }) || [];
++
++  return {
++    datasets: datasets,
++    refreshRate: refreshRate,
++  };
++}
++
++/* URL for fetching graphs data */
++export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
++  let base_url = url_for('dashboard.system_statistics');
++  base_url += '/' + sid;
++  base_url += (did > 0) ? ('/' + did) : '';
++  base_url += '?chart_names=' + chart_names.join(',');
++
++  return base_url;
++}
++
++/* This will process incoming charts data add it the previous charts
++ * data to get the new state.
++ */
++export function statsReducer(state, action) {
++
++  if(action.reset) {
++    return action.reset;
++  }
++
++  if(!action.incoming) {
++    return state;
++  }
++
++  if(!action.counterData) {
++    action.counterData = action.incoming;
++  }
++
++  let newState = {};
++  Object.keys(action.incoming).forEach(label => {
++    if(state[label]) {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++        ...state[label].slice(0, X_AXIS_LENGTH-1),
++      ];
++    } else {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++      ];
++    }
++  });
++  return newState;
++}
++
++const chartsDefault = {
++  'hpc_stats': {'Handle': new Array(X_AXIS_LENGTH).fill(null), 'Process': new Array(X_AXIS_LENGTH).fill(null)},
++};
++
++const SummaryTable = (props) => {
++  const classes = useStyles();
++  const data = props.data;
++  return (
++    <table className={classes.table}>
++      <thead>
++        <tr>
++          <th className={classes.tableVal}>Property</th>
++          <th className={classes.tableVal}>Value</th>
++        </tr>
++      </thead>
++      <tbody>
++        {data.map((item, index) => (
++          <tr className={classes.tableVal} key={index}>
++            <td className={classes.tableVal}>{item.name}</td>
++            <td className={classes.tableVal}>{item.value}</td>
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  );
++};
++
++SummaryTable.propTypes = {
++  data: PropTypes.any,
++};
++
++export default function Summary({preferences, sid, did, pageVisible, enablePoll=true}) {
++  const refreshOn = useRef(null);
++  const prevPrefernces = usePrevious(preferences);
++
++  const [processHandleCount, processHandleCountReduce] = useReducer(statsReducer, chartsDefault['hpc_stats']);
++  const [osStats, setOsStats] = useState([]);
++  const [cpuStats, setCpuStats] = useState([]);
++  const [processInfoStats] = useState({'Running': 4, 'Sleeping': 2, 'Stopped': 1, 'Zombie': 2});
++
++  const [, setCounterData] = useState({});
++
++  const [pollDelay, setPollDelay] = useState(5000);
++  const [longPollDelay] = useState(180000);
++  const [errorMsg, setErrorMsg] = useState(null);
++  const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
++
++  const tableHeader = [
++    {
++      Header: 'Property',
++      accessor: 'name',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++    {
++      Header: 'Value',
++      accessor: 'value',
++      sortable: true,
++      resizable: true,
++      disableGlobalFilter: false,
++    },
++  ];
++
++  useEffect(()=>{
++    let calcPollDelay = false;
++    if(prevPrefernces) {
++      if(prevPrefernces['hpc_stats_refresh'] != preferences['hpc_stats_refresh']) {
++        processHandleCountReduce({reset: chartsDefault['hpc_stats']});
++        calcPollDelay = true;
++      }
++    } else {
++      calcPollDelay = true;
++    }
++    if(calcPollDelay) {
++      const keys = Object.keys(chartsDefault);
++      const length = keys.length;
++      if(length == 1){
++        setPollDelay(
++          preferences[keys[0]+'_refresh']*1000
++        );
++      } else {
++        setPollDelay(
++          getGCD(Object.keys(chartsDefault).map((name)=>preferences[name+'_refresh']))*1000
++        );
++      }
++    }
++  }, [preferences]);
++
++  useEffect(()=>{
++    /* Charts rendered are not visible when, the dashboard is hidden but later visible */
++    if(pageVisible && !chartDrawnOnce) {
++      setChartDrawnOnce(true);
++    }
++  }, [pageVisible]);
++
++  useEffect(() => {
++    try {
++      // Fetch the latest data point from the API endpoint
++      let url;
++      url = url_for('dashboard.system_statistics');
++      url += '/' + sid;
++      url += did > 0 ? '/' + did : '';
++      url += '?chart_names=' + 'pg_sys_os_info,pg_sys_cpu_info';
++      const api = getApiInstance();
++      api({
++        url: url,
++        type: 'GET',
++      })
++        .then((res) => {
++          let data = res.data;
++
++          const os_info_obj = data['pg_sys_os_info'];
++          let os_info_list = [
++            { icon: '', name: 'Name', value: os_info_obj['name'] },
++            { icon: '', name: 'Version', value: os_info_obj['version'] },
++            { icon: '', name: 'Host name', value: os_info_obj['host_name'] },
++            { icon: '', name: 'Domain name', value: os_info_obj['domain_name'] },
++            { icon: '', name: 'Architecture', value: os_info_obj['architecture'] },
++            { icon: '', name: 'Os up since seconds', value: os_info_obj['os_up_since_seconds'] },
++          ];
++          setOsStats(os_info_list);
++
++          const cpu_info_obj = data['pg_sys_cpu_info'];
++          let cpu_info_list = [
++            { icon: '', name: 'Vendor', value: cpu_info_obj['vendor'] },
++            { icon: '', name: 'Description', value: cpu_info_obj['description'] },
++            { icon: '', name: 'Model name', value: cpu_info_obj['model_name'] },
++            { icon: '', name: 'No of cores', value: cpu_info_obj['no_of_cores'] },
++            { icon: '', name: 'Architecture', value: cpu_info_obj['architecture'] },
++            { icon: '', name: 'Clock speed Hz', value: cpu_info_obj['clock_speed_hz'] },
++            { icon: '', name: 'L1 dcache size', value: cpu_info_obj['l1dcache_size'] },
++            { icon: '', name: 'L1 icache size', value: cpu_info_obj['l1icache_size'] },
++            { icon: '', name: 'L2 cache size', value: cpu_info_obj['l2cache_size'] },
++            { icon: '', name: 'L3 cache size', value: cpu_info_obj['l3cache_size'] },
++          ];
++          setCpuStats(cpu_info_list);
++
++          setErrorMsg(null);
++        })
++        .catch((error) => {
++          console.error('Error fetching data:', error);
++        });
++    } catch (error) {
++      console.error('Error fetching data:', error);
++    }
++  }, [sid, did, enablePoll, pageVisible]);
++
++  useInterval(()=>{
++    const currEpoch = getEpoch();
++    if(refreshOn.current === null) {
++      let tmpRef = {};
++      Object.keys(chartsDefault).forEach((name)=>{
++        tmpRef[name] = currEpoch;
++      });
++      refreshOn.current = tmpRef;
++    }
++
++    let getFor = [];
++    Object.keys(chartsDefault).forEach((name)=>{
++      if(currEpoch >= refreshOn.current[name]) {
++        getFor.push(name);
++        refreshOn.current[name] = currEpoch + preferences[name+'_refresh'];
++      }
++    });
++
++    let path = getStatsUrl(sid, did, getFor);
++    if (!pageVisible){
++      return;
++    }
++    axios.get(path)
++      .then((resp)=>{
++        let data = resp.data;
++        setErrorMsg(null);
++        processHandleCountReduce({incoming: data['hpc_stats']});
++
++        setCounterData((prevCounterData)=>{
++          return {
++            ...prevCounterData,
++            ...data,
++          };
++        });
++      })
++      .catch((error)=>{
++        if(!errorMsg) {
++          processHandleCountReduce({reset:chartsDefault['hpc_stats']});
++          setCounterData({});
++          if(error.response) {
++            if (error.response.status === 428) {
++              setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
++            } else {
++              setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
++            }
++          } else if(error.request) {
++            setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
++            return;
++          } else {
++            console.error(error);
++          }
++        }
++      });
++  }, enablePoll ? pollDelay : -1);
++
++  useInterval(()=>{
++    // let url;
++    // url = url_for('dashboard.system_statistics');
++    // url += '/' + sid;
++    // url += did > 0 ? '/' + did : '';
++    // url += '?chart_names=' + 'pi_stats';
++    // axios.get(url)
++    //   .then((resp)=>{
++    //     let data = resp.data;
++    //     console.log("pi data: ", data);
++    //   })
++    //   .catch((error)=>{
++    //     if(!errorMsg) {
++    //       if(error.response) {
++    //         if (error.response.status === 428) {
++    //           setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
++    //         } else {
++    //           setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
++    //         }
++    //       } else if(error.request) {
++    //         setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
++    //         return;
++    //       } else {
++    //         console.error(error);
++    //       }
++    //     }
++    //   });
++  }, enablePoll ? longPollDelay : -1);
++
++  return (
++    <>
++      <div data-testid='graph-poll-delay' style={{display: 'none'}}>{pollDelay}</div>
++      {chartDrawnOnce &&
++        <SummaryWrapper
++          processHandleCount={transformData(processHandleCount, preferences['hpc_stats_refresh'])}
++          osStats={osStats}
++          cpuStats={cpuStats}
++          processInfoStats={transformData(processInfoStats, 5)}
++          tableHeader={tableHeader}
++          errorMsg={errorMsg}
++          showTooltip={preferences['graph_mouse_track']}
++          showDataPoints={preferences['graph_data_points']}
++          lineBorderWidth={preferences['graph_line_border_width']}
++          isDatabase={did > 0}
++          isTest={false}
++        />
++      }
++    </>
++  );
++}
++
++Summary.propTypes = {
++  preferences: PropTypes.object.isRequired,
++  sid: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  did: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
++  pageVisible: PropTypes.bool,
++  enablePoll: PropTypes.bool,
++};
++
++export function SummaryWrapper(props) {
++  const classes = useStyles();
++  const options = useMemo(()=>({
++    showDataPoints: props.showDataPoints,
++    showTooltip: props.showTooltip,
++    lineBorderWidth: props.lineBorderWidth,
++  }), [props.showTooltip, props.showDataPoints, props.lineBorderWidth]);
++  return (
++    <>
++      <Grid container spacing={1} className={classes.container}>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('OS Information')}</div>
++          <SummaryTable data={props.osStats} />
++        </Grid>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('Handle & Process Count')}</div>
++          <ChartContainer id='hpc-graph' title={gettext('')} datasets={props.processHandleCount.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <StreamingChart data={props.processHandleCount} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} showSecondAxis={true} />
++          </ChartContainer>
++        </Grid>
++      </Grid>
++      <Grid container spacing={1} className={classes.container}>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('CPU Information')}</div>
++          <SummaryTable data={props.cpuStats} />
++        </Grid>
++        <Grid item md={6} sm={12}>
++          <div className={classes.containerHeader}>{gettext('Process Information')}</div>
++          <ChartContainer id='pi-graph' title={gettext('')} datasets={props.processInfoStats.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++            <DonutChart data={props.processInfoStats.datasets} />
++          </ChartContainer>
++        </Grid>
++      </Grid>
++    </>
++  );
++}
++
++SummaryWrapper.propTypes = {
++  processHandleCount: PropTypes.any.isRequired,
++  osStats: PropTypes.any.isRequired,
++  cpuStats: PropTypes.any.isRequired,
++  processInfoStats: PropTypes.any.isRequired,
++  tableHeader: PropTypes.any.isRequired,
++  errorMsg: PropTypes.any,
++  showTooltip: PropTypes.bool,
++  showDataPoints: PropTypes.bool,
++  lineBorderWidth: PropTypes.number,
++  isDatabase: PropTypes.bool,
++  isTest: PropTypes.bool,
++};
+diff --git a/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql b/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
+new file mode 100644
+index 000000000..9024a2c5e
+--- /dev/null
++++ b/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
+@@ -0,0 +1,100 @@
++{% set add_union = false %}
++{% if 'pg_sys_os_info' in chart_names %}
++{% set add_union = true %}
++    SELECT 'pg_sys_os_info' AS chart_name, pg_catalog.row_to_json(t) AS chart_data
++    FROM (SELECT * FROM pg_sys_os_info()) t
++{% endif %}
++{% if add_union and 'pg_sys_cpu_info' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'pg_sys_cpu_info' in chart_names %}
++{% set add_union = true %}
++    SELECT 'pg_sys_cpu_info' AS chart_name, pg_catalog.row_to_json(t) AS chart_data
++    FROM (SELECT * FROM pg_sys_cpu_info()) t
++{% endif %}
++{% if add_union and 'hpc_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'hpc_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'hpc_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data
++    FROM (SELECT
++        (SELECT handle_count FROM pg_sys_os_info())  AS "{{ _('Handle') }}",
++        (SELECT process_count FROM pg_sys_os_info())  AS "{{ _('Process') }}"
++    ) t
++{% endif %}
++{% if add_union and 'cu_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'cu_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'cu_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data
++    FROM (SELECT * FROM pg_sys_cpu_usage_info()) t
++{% endif %}
++{% if add_union and 'la_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'la_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'la_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data FROM (SELECT * FROM pg_sys_load_avg_info()) t
++{% endif %}
++{% if add_union and 'pcu_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'pcu_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'pcu_stats' AS chart_name, (
++    SELECT to_json(pg_catalog.jsonb_object_agg('process'||row_number, pg_catalog.row_to_json(t)))
++    FROM (
++        SELECT pid, name, cpu_usage, ROW_NUMBER() OVER (ORDER BY pid) AS row_number
++        FROM pg_sys_cpu_memory_by_process()
++    ) t
++    ) AS chart_data
++{% endif %}
++{% if add_union and 'm_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'm_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'm_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data FROM (SELECT total_memory, used_memory, free_memory FROM pg_sys_memory_info()) t
++{% endif %}
++{% if add_union and 'sm_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'sm_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'sm_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data FROM (SELECT swap_total, swap_used, swap_free FROM pg_sys_memory_info()) t
++{% endif %}
++{% if add_union and 'pmu_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'pmu_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'pmu_stats' AS chart_name, (
++    SELECT to_json(pg_catalog.jsonb_object_agg('process'||row_number, pg_catalog.row_to_json(t)))
++    FROM (
++        SELECT pid, name, memory_usage, memory_bytes, ROW_NUMBER() OVER (ORDER BY pid) AS row_number
++        FROM pg_sys_cpu_memory_by_process()
++    ) t
++    ) AS chart_data
++{% endif %}
++{% if add_union and 'io_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'io_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'io_stats' AS chart_name, (
++    SELECT to_json(pg_catalog.jsonb_object_agg('disk'||row_number, pg_catalog.row_to_json(t)))
++    FROM (
++        SELECT *, ROW_NUMBER() OVER (ORDER BY device_name) AS row_number
++        FROM pg_sys_io_analysis_info()
++    ) t
++    ) AS chart_data
++{% endif %}
++{% if add_union and 'pi_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'pi_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'pi_stats' AS chart_name, pg_catalog.row_to_json(t) AS chart_data FROM (SELECT * FROM pg_sys_process_info()) t
++{% endif %}
+\ No newline at end of file
+diff --git a/web/pgadmin/static/js/components/PgChart/DonutChart.jsx b/web/pgadmin/static/js/components/PgChart/DonutChart.jsx
+new file mode 100644
+index 000000000..4da1d4435
+--- /dev/null
++++ b/web/pgadmin/static/js/components/PgChart/DonutChart.jsx
+@@ -0,0 +1,70 @@
++import React, { useEffect, useRef } from 'react';
++import Chart from 'chart.js/auto';
++import PropTypes from 'prop-types';
++
++export default function DonutChart({ data }) {
++  const chartRef = useRef(null);
++  const chartInstance = useRef(null);
++
++  useEffect(() => {
++    if (data && Object.keys(data).length > 0) {
++      if (chartInstance.current) {
++        // If chart instance exists, update the data
++        chartInstance.current.data.labels = data.map((item) => item.label);
++        chartInstance.current.data.datasets[0].data = data.map((item) => item.data);
++        chartInstance.current.update();
++      } else {
++        // If chart instance doesn't exist, create a new chart
++        const chartOptions = {
++          responsive: true,
++          maintainAspectRatio: false,
++          plugins: {
++            legend: {
++              display: false, // Hide the labels at the top
++            },
++          },
++          animation: {
++            duration: 0, // Disable the animation
++          },
++          tooltips: {
++            callbacks: {
++              label: function (tooltipItem, chartData) {
++                const dataset = chartData.datasets[tooltipItem.datasetIndex];
++                const total = dataset.data.reduce((previousValue, currentValue) => previousValue + currentValue);
++                const currentValue = dataset.data[tooltipItem.index];
++                const percentage = ((currentValue / total) * 100).toFixed(2) + '%';
++                return dataset.label + ': ' + currentValue + ' (' + percentage + ')';
++              },
++            },
++          },
++        };
++
++        const chartData = {
++          labels: data.map((item) => item.label),
++          datasets: [
++            {
++              data: data.map((item) => item.data),
++              backgroundColor: data.map((item) => item.borderColor),
++              hoverBackgroundColor: data.map((item) => item.borderColor),
++            },
++          ],
++        };
++
++        const ctx = chartRef.current.getContext('2d');
++        chartInstance.current = new Chart(ctx, {
++          type: 'doughnut',
++          data: chartData,
++          options: chartOptions,
++        });
++      }
++    }
++  }, [data]);
++
++  return (
++    <canvas ref={chartRef} />
++  );
++}
++
++DonutChart.propTypes = {
++  data: PropTypes.array.isRequired,
++};
+\ No newline at end of file
+diff --git a/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx b/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
+index bd465e3da..5ccfe3464 100644
+--- a/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
++++ b/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
+@@ -32,7 +32,7 @@ function tooltipPlugin(refreshRate) {
+     showTooltip();
+     let tooltipHtml=`<div>${(u.data[1].length-1-parseInt(u.legend.values[0]['_'])) * refreshRate + gettext(' seconds ago')}</div>`;
+     for(let i=1; i<u.series.length; i++) {
+-      tooltipHtml += `<div class="uplot-tooltip-label"><div style="height:12px; width:12px; background-color:${u.series[i].stroke()}"></div> ${u.series[i].label}: ${u.legend.values[i]['_']}</div>`;
++      tooltipHtml += `<div class='uplot-tooltip-label'><div style='height:12px; width:12px; background-color:${u.series[i].stroke()}'></div> ${u.series[i].label}: ${u.legend.values[i]['_']}</div>`;
+     }
+     tooltip.innerHTML = tooltipHtml;
+ 
+@@ -58,44 +58,32 @@ function tooltipPlugin(refreshRate) {
+   };
+ }
+ 
+-export default function StreamingChart({xRange=75, data, options}) {
++export default function StreamingChart({xRange=75, data, options, showSecondAxis=false}) {
+   const chartRef = useRef();
+   const theme = useTheme();
+   const { width, height, ref:containerRef } = useResizeDetector();
+-  const defaultOptions = useMemo(()=>({
+-    title: '',
+-    width: width,
+-    height: height,
+-    padding: [10, 0, 10, 0],
+-    focus: {
+-      alpha: 0.3,
+-    },
+-    cursor: {
+-      y: false,
+-      drag: {
+-        setScale: false,
+-      }
+-    },
+-    series: [
++  const defaultOptions = useMemo(()=> {
++    const series = [
+       {},
+-      ...(data.datasets?.map((datum)=>({
++      ...(data.datasets?.map((datum, index) => ({
+         label: datum.label,
+         stroke: datum.borderColor,
+         width: options.lineBorderWidth ?? 1,
+-        points: { show: options.showDataPoints ?? false, size: datum.pointHitRadius*2 }
+-      }))??{})
+-    ],
+-    scales: {
+-      x: {
+-        time: false,
+-      }
+-    },
+-    axes: [
++        scale: showSecondAxis && (index === 1) ? 'y1' : 'y',
++        points: { show: options.showDataPoints ?? false, size: datum.pointHitRadius * 2 },
++      })) ?? []),
++    ];
++
++    const axes = [
+       {
+         show: false,
+         stroke: theme.palette.text.primary,
+       },
+-      {
++    ];
++
++    if(showSecondAxis){
++      axes.push({
++        scale: 'y',
+         grid: {
+           stroke: theme.otherVars.borderColor,
+           width: 0.5,
+@@ -108,11 +96,104 @@ export default function StreamingChart({xRange=75, data, options}) {
+             if(size < 40) size = 40;
+           }
+           return size;
++        },
++        // y-axis configuration
++        values: (self, ticks) => {
++          // Format the label
++          return ticks.map((value) => {
++            if(value < 1){
++              return value+'';
++            }
++            const suffixes = ['', 'k', 'M', 'B', 'T'];
++            const suffixNum = Math.floor(Math.log10(value) / 3);
++            const shortValue = (value / Math.pow(1000, suffixNum)).toFixed(1);
++            return shortValue + suffixes[suffixNum];
++          });
++        }
++      });
++      axes.push({
++        scale: 'y1',
++        side: 1,
++        stroke: theme.palette.text.primary,
++        grid: {show: false},
++        size: function(_obj, values) {
++          let size = 40;
++          if(values?.length > 0) {
++            size = values[values.length-1].length*12;
++            if(size < 40) size = 40;
++          }
++          return size;
++        },
++        // y-axis configuration
++        values: (self, ticks) => {
++          // Format the label
++          return ticks.map((value) => {
++            if(value < 1){
++              return value+'';
++            }
++            const suffixes = ['', 'k', 'M', 'B', 'T'];
++            const suffixNum = Math.floor(Math.log10(value) / 3);
++            const shortValue = (value / Math.pow(1000, suffixNum)).toFixed(1);
++            return shortValue + suffixes[suffixNum];
++          });
+         }
+-      }
+-    ],
+-    plugins: options.showTooltip ? [tooltipPlugin(data.refreshRate)] : [],
+-  }), [data.refreshRate, data?.datasets?.length, width, height, options]);
++      });
++    } else{
++      axes.push({
++        scale: 'y',
++        grid: {
++          stroke: theme.otherVars.borderColor,
++          width: 0.5,
++        },
++        stroke: theme.palette.text.primary,
++        size: function(_obj, values) {
++          let size = 40;
++          if(values?.length > 0) {
++            size = values[values.length-1].length*12;
++            if(size < 40) size = 40;
++          }
++          return size;
++        },
++        // y-axis configuration
++        values: (self, ticks) => {
++          // Format the label
++          return ticks.map((value) => {
++            if(value < 1){
++              return value+'';
++            }
++            const suffixes = ['', 'k', 'M', 'B', 'T'];
++            const suffixNum = Math.floor(Math.log10(value) / 3);
++            const shortValue = (value / Math.pow(1000, suffixNum)).toFixed(1);
++            return shortValue + suffixes[suffixNum];
++          });
++        }
++      });
++    }
++
++    return {
++      title: '',
++      width: width,
++      height: height,
++      padding: [10, 0, 10, 0],
++      focus: {
++        alpha: 0.3,
++      },
++      cursor: {
++        y: false,
++        drag: {
++          setScale: false,
++        }
++      },
++      series: series,
++      scales: {
++        x: {
++          time: false,
++        }
++      },
++      axes: axes,
++      plugins: options.showTooltip ? [tooltipPlugin(data.refreshRate)] : [],
++    };
++  }, [data.refreshRate, data?.datasets?.length, width, height, options]);
+ 
+   const initialState = [
+     Array.from(new Array(xRange).keys()),
+@@ -140,4 +221,5 @@ StreamingChart.propTypes = {
+   xRange: PropTypes.number.isRequired,
+   data: propTypeData.isRequired,
+   options: PropTypes.object,
++  showSecondAxis: PropTypes.bool,
+ };
+-- 
+2.41.0.windows.1
+
+
+From 7893b50d1b642ec9c8b66bb68fb8d19145a6b47d Mon Sep 17 00:00:00 2001
+From: Sahil Harpal <santosh.2@iitj.ac.in>
+Date: Thu, 17 Aug 2023 15:31:59 +0530
+Subject: [PATCH 2/4] Handle null values for CPU & memory usage
+
+---
+ web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx    | 4 ++++
+ web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+index 276034d9e..a6341954f 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+@@ -54,6 +54,10 @@ const useStyles = makeStyles((theme) => ({
+ }));
+ 
+ export function formatBytes(bytes) {
++  if (bytes === null) {
++    return 'null';
++  }
++
+   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+   let unitIndex = 0;
+ 
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+index 74e8f424b..9d32795dd 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+@@ -45,6 +45,10 @@ const useStyles = makeStyles((theme) => ({
+ }));
+ 
+ export function formatBytes(bytes) {
++  if (bytes === null) {
++    return 'null';
++  }
++
+   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+   let unitIndex = 0;
+ 
+-- 
+2.41.0.windows.1
+
+
+From 8d8717f8fbb9345ac51c3592cdb6c1f4f867aa7d Mon Sep 17 00:00:00 2001
+From: Sahil Harpal <santosh.2@iitj.ac.in>
+Date: Fri, 25 Aug 2023 13:10:10 +0530
+Subject: [PATCH 3/4] Review-2 changes
+
+---
+ web/pgadmin/dashboard/static/js/Dashboard.jsx |   3 +
+ .../dashboard/static/js/SystemStats/CPU.jsx   |   6 +-
+ .../static/js/SystemStats/Memory.jsx          |   4 +-
+ .../static/js/SystemStats/Storage.jsx         | 267 ++++++++++++++++--
+ .../static/js/SystemStats/Summary.jsx         |  12 +-
+ .../sql/default/system_statistics.sql         |  13 +
+ .../js/components/PgChart/StreamingChart.jsx  |  15 +-
+ 7 files changed, 283 insertions(+), 37 deletions(-)
+
+diff --git a/web/pgadmin/dashboard/static/js/Dashboard.jsx b/web/pgadmin/dashboard/static/js/Dashboard.jsx
+index e6afeff07..2944a4e83 100644
+--- a/web/pgadmin/dashboard/static/js/Dashboard.jsx
++++ b/web/pgadmin/dashboard/static/js/Dashboard.jsx
+@@ -818,6 +818,8 @@ export default function Dashboard({
+             const data = res.data;
+             if(data['ss_present'] == false){
+               setSsMsg(gettext('System stats extension is not installed. You can install the extension in a database using the "CREATE EXTENSION system_stats;" SQL command. Reload the pgAdmin once you installed.'));
++            } else {
++              setSsMsg(gettext(''));
+             }
+           })
+           .catch(() => {
+@@ -1034,6 +1036,7 @@ export default function Dashboard({
+                             did={did}
+                             pageVisible={props.panelVisible}
+                             serverConnected={props.serverConnected}
++                            systemStatsTabVal={systemStatsTabVal}
+                           />
+                         </TabPanel>
+                       </> :
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+index a6341954f..e6b766767 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+@@ -36,13 +36,11 @@ const useStyles = makeStyles((theme) => ({
+   },
+   container: {
+     height: 'auto',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
+   },
+   fixedContainer: {
+     height: '577px',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
+   },
+@@ -338,13 +336,13 @@ export function CPUWrapper(props) {
+     <>
+       <Grid container spacing={1} className={classes.container}>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('CPU Usage ()')}</div>
++          <div className={classes.containerHeader}>{gettext('CPU usage')}</div>
+           <ChartContainer id='cu-graph' title={gettext('')} datasets={props.cpuUsageInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+             <StreamingChart data={props.cpuUsageInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
+           </ChartContainer>
+         </Grid>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('Load Average')}</div>
++          <div className={classes.containerHeader}>{gettext('Load average')}</div>
+           <ChartContainer id='la-graph' title={gettext('')} datasets={props.loadAvgInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+             <StreamingChart data={props.loadAvgInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
+           </ChartContainer>
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+index 9d32795dd..8e8e0eb89 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+@@ -27,13 +27,11 @@ const useStyles = makeStyles((theme) => ({
+   },
+   container: {
+     height: 'auto',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
+   },
+   fixedContainer: {
+     height: '577px',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
+   },
+@@ -339,7 +337,7 @@ export function MemoryWrapper(props) {
+           </ChartContainer>
+         </Grid>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('Swap Memory')}</div>
++          <div className={classes.containerHeader}>{gettext('Swap memory')}</div>
+           <ChartContainer id='sm-graph' title={gettext('')} datasets={props.swapMemoryUsageInfo.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+             <StreamingChart data={props.swapMemoryUsageInfo} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
+           </ChartContainer>
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+index 2acb217bd..9db08b093 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+@@ -10,6 +10,7 @@ import { DATA_POINT_SIZE } from 'sources/chartjs';
+ import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
+ import {useInterval, usePrevious} from 'sources/custom_hooks';
+ import axios from 'axios';
++import { BarChart } from '../../../../static/js/chartjs';
+ 
+ export const X_AXIS_LENGTH = 75;
+ 
+@@ -26,22 +27,24 @@ const useStyles = makeStyles((theme) => ({
+   },
+   container: {
+     height: 'auto',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+-    marginBottom: '30px',
++    marginBottom: '15px',
+   },
+   ioDiskContainer: {
+     height: 'auto',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+   },
+   fixedContainer: {
+     height: '577px',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
++    overflowX: 'auto',
+   },
+   containerHeader: {
++    height: 'auto',
++    padding: '10px',
++  },
++  containerHeaderText: {
+     fontSize: '16px',
+     fontWeight: 'bold',
+     marginBottom: '5px',
+@@ -50,9 +53,37 @@ const useStyles = makeStyles((theme) => ({
+     fontSize: '14px',
+     fontWeight: 'bold',
+     marginBottom: '5px',
+-  }
++  },
++  table: {
++    width: '100%',
++    backgroundColor: theme.otherVars.tableBg,
++    border: '1px solid rgb(221, 224, 230)',
++    borderCollapse: 'collapse',
++    borderRadius: '4px',
++    overflow: 'hidden',
++  },
++  tableVal: {
++    border: '1px solid rgb(221, 224, 230) !important',
++    padding: '10px !important',
++  },
+ }));
+ 
++export function formatBytes(bytes) {
++  if (bytes === null) {
++    return 'null';
++  }
++
++  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
++  let unitIndex = 0;
++
++  while (bytes >= 1024 && unitIndex < units.length - 1) {
++    bytes /= 1024;
++    unitIndex++;
++  }
++
++  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
++}
++
+ export function transformData(labels, refreshRate) {
+   const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
+   let datasets = Object.keys(labels).map((label, i)=>{
+@@ -120,10 +151,43 @@ const chartsDefault = {
+   'io_stats': {},
+ };
+ 
+-export default function Storage({preferences, sid, did, pageVisible, enablePoll=true}) {
++
++const DiskStatsTable = (props) => {
++  const classes = useStyles();
++  const tableHeader = props.tableHeader;
++  const data = props.data;
++  return (
++    <table className={classes.table}>
++      <thead>
++        <tr>
++          {tableHeader.map((item, index) => (
++            <th className={classes.tableVal} key={index}>{item.Header}</th>
++          ))}
++        </tr>
++      </thead>
++      <tbody>
++        {data.map((item, index) => (
++          <tr className={classes.tableVal} key={index}>
++            {tableHeader.map((header, id) => (
++              <td className={classes.tableVal} key={header.accessor+'-'+id}>{item[header.accessor]}</td>
++            ))}
++          </tr>
++        ))}
++      </tbody>
++    </table>
++  );
++};
++
++DiskStatsTable.propTypes = {
++  data: PropTypes.array.isRequired,
++  tableHeader: PropTypes.array.isRequired,
++};
++
++export default function Storage({preferences, sid, did, pageVisible, enablePoll=true, systemStatsTabVal}) {
+   const refreshOn = useRef(null);
+   const prevPrefernces = usePrevious(preferences);
+ 
++  const [diskStats, setDiskStats] = useState([]);
+   const [ioInfo, ioInfoReduce] = useReducer(ioStatsReducer, chartsDefault['io_stats']);
+ 
+   const [, setCounterData] = useState({});
+@@ -132,6 +196,49 @@ export default function Storage({preferences, sid, did, pageVisible, enablePoll=
+   const [errorMsg, setErrorMsg] = useState(null);
+   const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
+ 
++  const tableHeader = [
++    {
++      Header: 'File system',
++      accessor: 'file_system',
++    },
++    {
++      Header: 'File system type',
++      accessor: 'file_system_type',
++    },
++    {
++      Header: 'Mount point',
++      accessor: 'mount_point',
++    },
++    {
++      Header: 'Drive letter',
++      accessor: 'drive_letter',
++    },
++    {
++      Header: 'Total space',
++      accessor: 'total_space',
++    },
++    {
++      Header: 'Used space',
++      accessor: 'used_space',
++    },
++    {
++      Header: 'Free space',
++      accessor: 'free_space',
++    },
++    {
++      Header: 'Total inodes',
++      accessor: 'total_inodes',
++    },
++    {
++      Header: 'Used inodes',
++      accessor: 'used_inodes',
++    },
++    {
++      Header: 'Free inodes',
++      accessor: 'free_inodes',
++    },
++  ];
++
+   useEffect(()=>{
+     let calcPollDelay = false;
+     if(prevPrefernces) {
+@@ -164,6 +271,50 @@ export default function Storage({preferences, sid, did, pageVisible, enablePoll=
+     }
+   }, [pageVisible]);
+ 
++  useEffect(() => {
++    try {
++      // Fetch the latest data point from the API endpoint
++      let url;
++      url = url_for('dashboard.system_statistics');
++      url += '/' + sid;
++      url += did > 0 ? '/' + did : '';
++      url += '?chart_names=' + 'di_stats';
++      axios.get(url)
++        .then((res) => {
++          let data = res.data;
++          setErrorMsg(null);
++          if(data.hasOwnProperty('di_stats')){
++            let di_info_list = [];
++            const di_info_obj = data['di_stats'];
++            for (const key in di_info_obj) {
++              di_info_list.push({ 
++                icon: '', 
++                file_system: di_info_obj[key]['file_system']?di_info_obj[key]['file_system']:'null',
++                file_system_type: di_info_obj[key]['file_system_type']?di_info_obj[key]['file_system_type']:'null',
++                mount_point: di_info_obj[key]['mount_point']?di_info_obj[key]['mount_point']:'null',
++                drive_letter: di_info_obj[key]['drive_letter']?di_info_obj[key]['drive_letter']:'null',
++                total_space: di_info_obj[key]['total_space']?formatBytes(di_info_obj[key]['total_space']):'null',
++                used_space: di_info_obj[key]['used_space']?formatBytes(di_info_obj[key]['used_space']):'null',
++                free_space: di_info_obj[key]['free_space']?formatBytes(di_info_obj[key]['free_space']):'null',
++                total_inodes: di_info_obj[key]['total_inodes']?di_info_obj[key]['total_inodes']:'null',
++                used_inodes: di_info_obj[key]['used_inodes']?di_info_obj[key]['used_inodes']:'null',
++                free_inodes: di_info_obj[key]['free_inodes']?di_info_obj[key]['free_inodes']:'null',
++                total_space_actual: di_info_obj[key]['total_space']?di_info_obj[key]['total_space']:null,
++                used_space_actual: di_info_obj[key]['used_space']?di_info_obj[key]['used_space']:null,
++                free_space_actual: di_info_obj[key]['free_space']?di_info_obj[key]['free_space']:null,
++              });
++            }
++            setDiskStats(di_info_list);
++          }
++        })
++        .catch((error) => {
++          console.error('Error fetching data:', error);
++        });
++    } catch (error) {
++      console.error('Error fetching data:', error);
++    }
++  }, [systemStatsTabVal, sid, did, enablePoll, pageVisible]);
++
+   useInterval(()=>{
+     const currEpoch = getEpoch();
+     if(refreshOn.current === null) {
+@@ -258,6 +409,8 @@ export default function Storage({preferences, sid, did, pageVisible, enablePoll=
+         <StorageWrapper
+           ioInfo={ioInfo}
+           ioRefreshRate={preferences['io_stats_refresh']}
++          diskStats={diskStats}
++          tableHeader={tableHeader}
+           errorMsg={errorMsg}
+           showTooltip={preferences['graph_mouse_track']}
+           showDataPoints={preferences['graph_data_points']}
+@@ -276,6 +429,7 @@ Storage.propTypes = {
+   did: PropTypes.oneOfType([PropTypes.string.isRequired, PropTypes.number.isRequired]),
+   pageVisible: PropTypes.bool,
+   enablePoll: PropTypes.bool,
++  systemStatsTabVal: PropTypes.number,
+ };
+ 
+ export function StorageWrapper(props) {
+@@ -289,25 +443,88 @@ export function StorageWrapper(props) {
+   const keys = Object.keys(props.ioInfo);
+   return (
+     <>
+-      {keys.map((key, index) => (
+-        index % 3 === 0 && (
+-          <Grid key={`disk-${index}`} container spacing={1} className={classes.container}>
+-            <Grid container spacing={1} className={classes.ioDiskContainer}>
+-              <div className={classes.containerHeader}>{gettext(`Disk ${Math.floor(index / 3) + 1}`)}</div>
+-            </Grid>
+-            <Grid container spacing={1} className={classes.ioDiskContainer}>
+-              {keys.slice(index, index + 3).map((innerKey, innerKeyIndex) => (
+-                <Grid key={`${innerKey}`} item md={4} sm={6}>
+-                  <div className={classes.chartHeader}>{innerKeyIndex==0 ? gettext('I/O Operations Count'): innerKeyIndex==1? gettext('Data Transfer (Bytes)'):gettext('Time Spent in I/O Operations (Milliseconds)')}</div>
+-                  <ChartContainer id={`io-graph-${innerKey}`} title={gettext('')} datasets={transformData(props.ioInfo[innerKey], props.ioRefreshRate).datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+-                    <StreamingChart data={transformData(props.ioInfo[innerKey], props.ioRefreshRate)} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
+-                  </ChartContainer>
+-                </Grid>
+-              ))}
+-            </Grid>
++      <Grid container spacing={1} className={classes.container}>
++        <Grid container spacing={1} className={classes.containerHeader}>
++          <div className={classes.containerHeaderText}>{gettext('Disk information')}</div>
++        </Grid>
++        <Grid container spacing={1} className={classes.container}>
++          <DiskStatsTable tableHeader={props.tableHeader} data={props.diskStats} />
++        </Grid>
++        <Grid container spacing={1} className={classes.container}>
++          <Grid item md={6} sm={12}>
++            <ChartContainer id='ua-space-graph' title={gettext('')} datasets={[{borderColor: '#FF6384', label: 'Used space'}, {borderColor: '#36a2eb', label: 'Available space'}]}  errorMsg={props.errorMsg} isTest={props.isTest}>
++              <BarChart data={{
++                labels: props.diskStats.map((item, index) => item.mount_point!='null'?item.mount_point:item.drive_letter!='null'?item.drive_letter:'disk'+index),
++                datasets: [
++                  {
++                    label: 'Used space',
++                    data: props.diskStats.map((item) => item.used_space_actual?item.used_space_actual:0),
++                    backgroundColor: '#FF6384',
++                    borderColor: '#FF6384',
++                    borderWidth: 1,
++                  },
++                  {
++                    label: 'Available space',
++                    data: props.diskStats.map((item) => item.free_space_actual?item.free_space_actual:0),
++                    backgroundColor: '#36a2eb',
++                    borderColor: '#36a2eb',
++                    borderWidth: 1,
++                  },
++                ],
++              }}
++              options={
++                { 
++                  scales: {
++                    x: {
++                      display: true,
++                      ticks: {
++                        display: true,
++                      },
++                    },
++                    y: {
++                      beginAtZero: true,
++                      ticks: {
++                        callback: function (value) {
++                          return formatBytes(value);
++                        },
++                      },
++                    },
++                  },
++                  plugins: {
++                    legend: {
++                      display: false,
++                    },
++                  },
++                }
++              }
++              />
++            </ChartContainer>
+           </Grid>
+-        )
+-      ))}
++          <Grid item md={6} sm={12}>
++          </Grid>
++        </Grid>
++      </Grid>
++      <Grid container spacing={1} className={classes.container}>
++        {keys.map((key, index) => (
++          index % 3 === 0 && (
++            <Grid key={`disk-${index}`} container spacing={1} className={classes.container}>
++              <Grid container spacing={1} className={classes.containerHeader}>
++                <div className={classes.containerHeaderText}>{gettext(`Disk ${Math.floor(index / 3) + 1}`)}</div>
++              </Grid>
++              <Grid container spacing={1} className={classes.ioDiskContainer}>
++                {keys.slice(index, index + 3).map((innerKey, innerKeyIndex) => (
++                  <Grid key={`${innerKey}`} item md={4} sm={6}>
++                    <div className={classes.chartHeader}>{innerKeyIndex==0 ? gettext('I/O operations count'): innerKeyIndex==1? gettext('Data transfer (bytes)'):gettext('Time spent in I/O operations (milliseconds)')}</div>
++                    <ChartContainer id={`io-graph-${innerKey}`} title={gettext('')} datasets={transformData(props.ioInfo[innerKey], props.ioRefreshRate).datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++                      <StreamingChart data={transformData(props.ioInfo[innerKey], props.ioRefreshRate)} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++                    </ChartContainer>
++                  </Grid>
++                ))}
++              </Grid>
++            </Grid>
++          )
++        ))}
++      </Grid>
+     </>
+   );
+ }
+@@ -320,6 +537,8 @@ StorageWrapper.propTypes = {
+     })
+   ),
+   ioRefreshRate: PropTypes.number.isRequired,
++  diskStats: PropTypes.array.isRequired,
++  tableHeader: PropTypes.array.isRequired,
+   errorMsg: PropTypes.string,
+   showTooltip: PropTypes.bool.isRequired,
+   showDataPoints: PropTypes.bool.isRequired,
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+index 9b2ee9a30..1cda27a01 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+@@ -30,6 +30,9 @@ const useStyles = makeStyles((theme) => ({
+     width: '100%',
+     backgroundColor: theme.otherVars.tableBg,
+     border: '1px solid rgb(221, 224, 230)',
++    borderCollapse: 'collapse',
++    borderRadius: '4px',
++    overflow: 'hidden',
+   },
+   tableVal: {
+     border: '1px solid rgb(221, 224, 230) !important',
+@@ -37,7 +40,6 @@ const useStyles = makeStyles((theme) => ({
+   },
+   container: {
+     height: 'auto',
+-    background: theme.palette.grey[200],
+     padding: '10px',
+     marginBottom: '30px',
+   },
+@@ -381,11 +383,11 @@ export function SummaryWrapper(props) {
+     <>
+       <Grid container spacing={1} className={classes.container}>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('OS Information')}</div>
++          <div className={classes.containerHeader}>{gettext('OS information')}</div>
+           <SummaryTable data={props.osStats} />
+         </Grid>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('Handle & Process Count')}</div>
++          <div className={classes.containerHeader}>{gettext('Handle & process count')}</div>
+           <ChartContainer id='hpc-graph' title={gettext('')} datasets={props.processHandleCount.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+             <StreamingChart data={props.processHandleCount} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} showSecondAxis={true} />
+           </ChartContainer>
+@@ -393,11 +395,11 @@ export function SummaryWrapper(props) {
+       </Grid>
+       <Grid container spacing={1} className={classes.container}>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('CPU Information')}</div>
++          <div className={classes.containerHeader}>{gettext('CPU information')}</div>
+           <SummaryTable data={props.cpuStats} />
+         </Grid>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('Process Information')}</div>
++          <div className={classes.containerHeader}>{gettext('Process information')}</div>
+           <ChartContainer id='pi-graph' title={gettext('')} datasets={props.processInfoStats.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+             <DonutChart data={props.processInfoStats.datasets} />
+           </ChartContainer>
+diff --git a/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql b/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
+index 9024a2c5e..35fe9042d 100644
+--- a/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
++++ b/web/pgadmin/dashboard/templates/dashboard/sql/default/system_statistics.sql
+@@ -91,6 +91,19 @@
+     ) t
+     ) AS chart_data
+ {% endif %}
++{% if add_union and 'di_stats' in chart_names %}
++    UNION ALL
++{% endif %}
++{% if 'di_stats' in chart_names %}
++{% set add_union = true %}
++    SELECT 'di_stats' AS chart_name, (
++    SELECT to_json(pg_catalog.jsonb_object_agg('Drive'||row_number, pg_catalog.row_to_json(t)))
++    FROM (
++        SELECT *, ROW_NUMBER() OVER (ORDER BY total_space) AS row_number
++        FROM pg_sys_disk_info() WHERE mount_point IS NOT NULL OR drive_letter IS NOT NULL
++    ) t
++    ) AS chart_data
++{% endif %}
+ {% if add_union and 'pi_stats' in chart_names %}
+     UNION ALL
+ {% endif %}
+diff --git a/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx b/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
+index 5ccfe3464..34a1a8fea 100644
+--- a/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
++++ b/web/pgadmin/static/js/components/PgChart/StreamingChart.jsx
+@@ -5,6 +5,16 @@ import gettext from 'sources/gettext';
+ import PropTypes from 'prop-types';
+ import { useTheme } from '@material-ui/styles';
+ 
++const removeExistingTooltips = () => {
++  // Select all elements with the class name "uplot-tooltip"
++  const tooltipLabels = document.querySelectorAll('.uplot-tooltip');
++
++  // Remove each selected element
++  tooltipLabels.forEach((tooltipLabel) => {
++    tooltipLabel.remove();
++  });
++};
++
+ function tooltipPlugin(refreshRate) {
+   let tooltipTopOffset = -20;
+   let tooltipLeftOffset = 10;
+@@ -12,13 +22,14 @@ function tooltipPlugin(refreshRate) {
+ 
+   function showTooltip() {
+     if(!tooltip) {
++      removeExistingTooltips();
+       tooltip = document.createElement('div');
+       tooltip.className = 'uplot-tooltip';
+       tooltip.style.display = 'block';
+       document.body.appendChild(tooltip);
+     }
+   }
+-
++  
+   function hideTooltip() {
+     tooltip?.remove();
+     tooltip = null;
+@@ -62,6 +73,7 @@ export default function StreamingChart({xRange=75, data, options, showSecondAxis
+   const chartRef = useRef();
+   const theme = useTheme();
+   const { width, height, ref:containerRef } = useResizeDetector();
++
+   const defaultOptions = useMemo(()=> {
+     const series = [
+       {},
+@@ -170,6 +182,7 @@ export default function StreamingChart({xRange=75, data, options, showSecondAxis
+       });
+     }
+ 
++
+     return {
+       title: '',
+       width: width,
+-- 
+2.41.0.windows.1
+
+
+From b55e737ae3ee75302b3c29e73353fb9d7ca6b358 Mon Sep 17 00:00:00 2001
+From: Sahil Harpal <santosh.2@iitj.ac.in>
+Date: Sun, 27 Aug 2023 12:41:44 +0530
+Subject: [PATCH 4/4] Added disk stats charts, removed static process info
+ chart and added utility for common helper functions
+
+---
+ .../dashboard/static/js/SystemStats/CPU.jsx   |  80 +------
+ .../static/js/SystemStats/Memory.jsx          |  80 +------
+ .../static/js/SystemStats/Storage.jsx         | 204 +++++++++---------
+ .../static/js/SystemStats/Summary.jsx         | 104 +--------
+ .../static/js/SystemStats/Utility.jsx         |  85 ++++++++
+ .../js/components/PgChart/DonutChart.jsx      |  70 ------
+ 6 files changed, 192 insertions(+), 431 deletions(-)
+ create mode 100644 web/pgadmin/dashboard/static/js/SystemStats/Utility.jsx
+ delete mode 100644 web/pgadmin/static/js/components/PgChart/DonutChart.jsx
+
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+index e6b766767..79721a265 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/CPU.jsx
+@@ -12,7 +12,6 @@ import PgTable from 'sources/components/PgTable';
+ import gettext from 'sources/gettext';
+ import PropTypes from 'prop-types';
+ import { makeStyles } from '@material-ui/core/styles';
+-import url_for from 'sources/url_for';
+ import {getGCD, getEpoch} from 'sources/utils';
+ import {ChartContainer} from '../Dashboard';
+ import { Grid } from '@material-ui/core';
+@@ -20,8 +19,7 @@ import { DATA_POINT_SIZE } from 'sources/chartjs';
+ import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
+ import {useInterval, usePrevious} from 'sources/custom_hooks';
+ import axios from 'axios';
+-
+-export const X_AXIS_LENGTH = 75;
++import { getStatsUrl, transformData, statsReducer, formatBytes, X_AXIS_LENGTH } from './Utility';
+ 
+ const useStyles = makeStyles((theme) => ({
+   autoResizer: {
+@@ -51,82 +49,6 @@ const useStyles = makeStyles((theme) => ({
+   }
+ }));
+ 
+-export function formatBytes(bytes) {
+-  if (bytes === null) {
+-    return 'null';
+-  }
+-
+-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+-  let unitIndex = 0;
+-
+-  while (bytes >= 1024 && unitIndex < units.length - 1) {
+-    bytes /= 1024;
+-    unitIndex++;
+-  }
+-
+-  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
+-}
+-
+-export function transformData(labels, refreshRate) {
+-  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
+-  let datasets = Object.keys(labels).map((label, i)=>{
+-    return {
+-      label: label,
+-      data: labels[label] || [],
+-      borderColor: colors[i],
+-      pointHitRadius: DATA_POINT_SIZE,
+-    };
+-  }) || [];
+-
+-  return {
+-    datasets: datasets,
+-    refreshRate: refreshRate,
+-  };
+-}
+-
+-/* URL for fetching graphs data */
+-export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
+-  let base_url = url_for('dashboard.system_statistics');
+-  base_url += '/' + sid;
+-  base_url += (did > 0) ? ('/' + did) : '';
+-  base_url += '?chart_names=' + chart_names.join(',');
+-
+-  return base_url;
+-}
+-
+-/* This will process incoming charts data add it the previous charts
+- * data to get the new state.
+- */
+-export function statsReducer(state, action) {
+-
+-  if(action.reset) {
+-    return action.reset;
+-  }
+-
+-  if(!action.incoming) {
+-    return state;
+-  }
+-
+-  if(!action.counterData) {
+-    action.counterData = action.incoming;
+-  }
+-
+-  let newState = {};
+-  Object.keys(action.incoming).forEach(label => {
+-    if(state[label]) {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-        ...state[label].slice(0, X_AXIS_LENGTH-1),
+-      ];
+-    } else {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-      ];
+-    }
+-  });
+-  return newState;
+-}
+-
+ const chartsDefault = {
+   'cu_stats': {'User Normal': [], 'User Niced': [], 'Kernel': [], 'Idle': []},
+   'la_stats': {'1 min': [], '5 mins': [], '10 mins': [], '15 mins': []},
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+index 8e8e0eb89..bac24a7f2 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Memory.jsx
+@@ -3,7 +3,6 @@ import PgTable from 'sources/components/PgTable';
+ import gettext from 'sources/gettext';
+ import PropTypes from 'prop-types';
+ import { makeStyles } from '@material-ui/core/styles';
+-import url_for from 'sources/url_for';
+ import {getGCD, getEpoch} from 'sources/utils';
+ import {ChartContainer} from '../Dashboard';
+ import { Grid } from '@material-ui/core';
+@@ -11,8 +10,7 @@ import { DATA_POINT_SIZE } from 'sources/chartjs';
+ import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
+ import {useInterval, usePrevious} from 'sources/custom_hooks';
+ import axios from 'axios';
+-
+-export const X_AXIS_LENGTH = 75;
++import { getStatsUrl, transformData, statsReducer, formatBytes, X_AXIS_LENGTH } from './Utility';
+ 
+ const useStyles = makeStyles((theme) => ({
+   autoResizer: {
+@@ -42,82 +40,6 @@ const useStyles = makeStyles((theme) => ({
+   }
+ }));
+ 
+-export function formatBytes(bytes) {
+-  if (bytes === null) {
+-    return 'null';
+-  }
+-
+-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+-  let unitIndex = 0;
+-
+-  while (bytes >= 1024 && unitIndex < units.length - 1) {
+-    bytes /= 1024;
+-    unitIndex++;
+-  }
+-
+-  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
+-}
+-
+-export function transformData(labels, refreshRate) {
+-  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
+-  let datasets = Object.keys(labels).map((label, i)=>{
+-    return {
+-      label: label,
+-      data: labels[label] || [],
+-      borderColor: colors[i],
+-      pointHitRadius: DATA_POINT_SIZE,
+-    };
+-  }) || [];
+-
+-  return {
+-    datasets: datasets,
+-    refreshRate: refreshRate,
+-  };
+-}
+-
+-/* URL for fetching graphs data */
+-export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
+-  let base_url = url_for('dashboard.system_statistics');
+-  base_url += '/' + sid;
+-  base_url += (did > 0) ? ('/' + did) : '';
+-  base_url += '?chart_names=' + chart_names.join(',');
+-
+-  return base_url;
+-}
+-
+-/* This will process incoming charts data add it the previous charts
+- * data to get the new state.
+- */
+-export function statsReducer(state, action) {
+-
+-  if(action.reset) {
+-    return action.reset;
+-  }
+-
+-  if(!action.incoming) {
+-    return state;
+-  }
+-
+-  if(!action.counterData) {
+-    action.counterData = action.incoming;
+-  }
+-
+-  let newState = {};
+-  Object.keys(action.incoming).forEach(label => {
+-    if(state[label]) {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-        ...state[label].slice(0, X_AXIS_LENGTH-1),
+-      ];
+-    } else {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-      ];
+-    }
+-  });
+-  return newState;
+-}
+-
+ const chartsDefault = {
+   'm_stats': {'Total': [], 'Used': [], 'Free': []},
+   'sm_stats': {'Total': [], 'Used': [], 'Free': []},
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+index 9db08b093..aed02293a 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Storage.jsx
+@@ -10,9 +10,8 @@ import { DATA_POINT_SIZE } from 'sources/chartjs';
+ import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
+ import {useInterval, usePrevious} from 'sources/custom_hooks';
+ import axios from 'axios';
+-import { BarChart } from '../../../../static/js/chartjs';
+-
+-export const X_AXIS_LENGTH = 75;
++import { BarChart, PieChart } from '../../../../static/js/chartjs';
++import { getStatsUrl, transformData, formatBytes, X_AXIS_LENGTH } from './Utility';
+ 
+ const useStyles = makeStyles((theme) => ({
+   autoResizer: {
+@@ -68,48 +67,12 @@ const useStyles = makeStyles((theme) => ({
+   },
+ }));
+ 
+-export function formatBytes(bytes) {
+-  if (bytes === null) {
+-    return 'null';
+-  }
+-
+-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+-  let unitIndex = 0;
+-
+-  while (bytes >= 1024 && unitIndex < units.length - 1) {
+-    bytes /= 1024;
+-    unitIndex++;
+-  }
+-
+-  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
+-}
+-
+-export function transformData(labels, refreshRate) {
+-  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
+-  let datasets = Object.keys(labels).map((label, i)=>{
+-    return {
+-      label: label,
+-      data: labels[label] || [],
+-      borderColor: colors[i],
+-      pointHitRadius: DATA_POINT_SIZE,
+-    };
+-  }) || [];
+-
+-  return {
+-    datasets: datasets,
+-    refreshRate: refreshRate,
+-  };
+-}
+-
+-/* URL for fetching graphs data */
+-export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
+-  let base_url = url_for('dashboard.system_statistics');
+-  base_url += '/' + sid;
+-  base_url += (did > 0) ? ('/' + did) : '';
+-  base_url += '?chart_names=' + chart_names.join(',');
+-
+-  return base_url;
+-}
++const colors = [
++  '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
++  '#FF9F40', '#8D6E63', '#2196F3', '#FFEB3B', '#9C27B0',
++  '#00BCD4', '#CDDC39', '#FF5722', '#3F51B5', '#FFC107',
++  '#607D8B', '#E91E63', '#009688', '#795548', '#FF9800'
++];
+ 
+ /* This will process incoming charts data add it the previous charts
+  * data to get the new state.
+@@ -131,17 +94,20 @@ export function ioStatsReducer(state, action) {
+   let newState = {};
+   Object.keys(action.incoming).forEach(disk_stats => {
+     newState[disk_stats] = {};
+-    Object.keys(action.incoming[disk_stats]).forEach(label => {
+-      if(state[disk_stats][label]) {
+-        newState[disk_stats][label] = [
+-          action.counter ?  action.incoming[disk_stats][label] - action.counterData[disk_stats][label] : action.incoming[disk_stats][label],
+-          ...state[disk_stats][label].slice(0, X_AXIS_LENGTH-1),
+-        ];
+-      } else {
+-        newState[disk_stats][label] = [
+-          action.counter ?  action.incoming[disk_stats][label] - action.counterData[disk_stats][label] : action.incoming[disk_stats][label],
+-        ];
+-      }
++    Object.keys(action.incoming[disk_stats]).forEach(type => {
++      newState[disk_stats][type] = {};
++      Object.keys(action.incoming[disk_stats][type]).forEach(label => {
++        if(state[disk_stats][type][label]) {
++          newState[disk_stats][type][label] = [
++            action.counter ?  action.incoming[disk_stats][type][label] - action.counterData[disk_stats][type][label] : action.incoming[disk_stats][type][label],
++            ...state[disk_stats][type][label].slice(0, X_AXIS_LENGTH-1),
++          ];
++        } else {
++          newState[disk_stats][type][label] = [
++            action.counter ?  action.incoming[disk_stats][type][label] - action.counterData[disk_stats][type][label] : action.incoming[disk_stats][type][label],
++          ];
++        }
++      });
+     });
+   });
+   return newState;
+@@ -344,33 +310,28 @@ export default function Storage({preferences, sid, did, pageVisible, enablePoll=
+         if(data.hasOwnProperty('io_stats')){
+           const io_info_obj = data['io_stats'];
+           for (const disk in io_info_obj) {
+-            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_total_rw`)){
+-              chartsDefault.io_stats[`${disk}_total_rw`] = {'Read': [], 'Write': []};
+-            }
+-            if(!ioInfo.hasOwnProperty(`${disk}_total_rw`)){
+-              ioInfo[`${disk}_total_rw`] = {'Read': [], 'Write': []};
+-            }
+-
+-            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_bytes_rw`)){
+-              chartsDefault.io_stats[`${disk}_bytes_rw`] = {'Read': [], 'Write': []};
+-            }
+-            if(!ioInfo.hasOwnProperty(`${disk}_bytes_rw`)){
+-              ioInfo[`${disk}_bytes_rw`] = {'Read': [], 'Write': []};
+-            }
+-
+-            if(!chartsDefault.io_stats.hasOwnProperty(`${disk}_time_rw`)){
+-              chartsDefault.io_stats[`${disk}_time_rw`] = {'Read': [], 'Write': []};
++            const device_name = (io_info_obj[disk]['device_name'] != null && io_info_obj[disk]['device_name'] != '')?io_info_obj[disk]['device_name']:`${disk}`;
++            if(!chartsDefault.io_stats.hasOwnProperty(device_name)){
++              chartsDefault.io_stats[device_name] = {};
++              chartsDefault.io_stats[device_name][`${device_name}_total_rw`] = {'Read': [], 'Write': []};
++              chartsDefault.io_stats[device_name][`${device_name}_bytes_rw`] = {'Read': [], 'Write': []};
++              chartsDefault.io_stats[device_name][`${device_name}_time_rw`] = {'Read': [], 'Write': []};
+             }
+-            if(!ioInfo.hasOwnProperty(`${disk}_time_rw`)){
+-              ioInfo[`${disk}_time_rw`] = {'Read': [], 'Write': []};
++            if(!ioInfo.hasOwnProperty(device_name)){
++              ioInfo[device_name] = {};
++              ioInfo[device_name][`${device_name}_total_rw`] = {'Read': [], 'Write': []};
++              ioInfo[device_name][`${device_name}_bytes_rw`] = {'Read': [], 'Write': []};
++              ioInfo[device_name][`${device_name}_time_rw`] = {'Read': [], 'Write': []};
+             }
+           }
+ 
+           let new_io_stats = {};
+           for (const disk in io_info_obj) {
+-            new_io_stats[`${disk}_total_rw`] = {'Read': io_info_obj[`${disk}`]['total_reads']?io_info_obj[`${disk}`]['total_reads']:0, 'Write': io_info_obj[`${disk}`]['total_writes']?io_info_obj[`${disk}`]['total_writes']:0};
+-            new_io_stats[`${disk}_bytes_rw`] = {'Read': io_info_obj[`${disk}`]['read_bytes']?io_info_obj[`${disk}`]['read_bytes']:0, 'Write': io_info_obj[`${disk}`]['write_bytes']?io_info_obj[`${disk}`]['write_bytes']:0};
+-            new_io_stats[`${disk}_time_rw`] = {'Read': io_info_obj[`${disk}`]['read_time_ms']?io_info_obj[`${disk}`]['read_time_ms']:0, 'Write': io_info_obj[`${disk}`]['write_time_ms']?io_info_obj[`${disk}`]['write_time_ms']:0};
++            const device_name = (io_info_obj[disk]['device_name'] != null && io_info_obj[disk]['device_name'] != '')?io_info_obj[disk]['device_name']:`${disk}`;
++            new_io_stats[device_name] = {};
++            new_io_stats[device_name][`${device_name}_total_rw`] = {'Read': io_info_obj[`${disk}`]['total_reads']?io_info_obj[`${disk}`]['total_reads']:0, 'Write': io_info_obj[`${disk}`]['total_writes']?io_info_obj[`${disk}`]['total_writes']:0};
++            new_io_stats[device_name][`${device_name}_bytes_rw`] = {'Read': io_info_obj[`${disk}`]['read_bytes']?io_info_obj[`${disk}`]['read_bytes']:0, 'Write': io_info_obj[`${disk}`]['write_bytes']?io_info_obj[`${disk}`]['write_bytes']:0};
++            new_io_stats[device_name][`${device_name}_time_rw`] = {'Read': io_info_obj[`${disk}`]['read_time_ms']?io_info_obj[`${disk}`]['read_time_ms']:0, 'Write': io_info_obj[`${disk}`]['write_time_ms']?io_info_obj[`${disk}`]['write_time_ms']:0};
+           }
+           ioInfoReduce({incoming: new_io_stats});
+         }
+@@ -440,7 +401,6 @@ export function StorageWrapper(props) {
+     lineBorderWidth: props.lineBorderWidth,
+   }), [props.showTooltip, props.showDataPoints, props.lineBorderWidth]);
+ 
+-  const keys = Object.keys(props.ioInfo);
+   return (
+     <>
+       <Grid container spacing={1} className={classes.container}>
+@@ -451,6 +411,48 @@ export function StorageWrapper(props) {
+           <DiskStatsTable tableHeader={props.tableHeader} data={props.diskStats} />
+         </Grid>
+         <Grid container spacing={1} className={classes.container}>
++          <Grid item md={6} sm={12}>
++            <ChartContainer 
++              id='t-space-graph' 
++              title={gettext('')} 
++              datasets={props.diskStats.map((item, index) => ({
++                borderColor: colors[(index + 2) % colors.length],
++                label: item.mount_point !== 'null' ? item.mount_point : item.drive_letter !== 'null' ? item.drive_letter : 'disk' + index,
++              }))}
++              errorMsg={props.errorMsg} 
++              isTest={props.isTest}>
++              <PieChart data={{
++                labels: props.diskStats.map((item, index) => item.mount_point!='null'?item.mount_point:item.drive_letter!='null'?item.drive_letter:'disk'+index),
++                datasets: [
++                  {
++                    data: props.diskStats.map((item) => item.total_space_actual?item.total_space_actual:0),
++                    backgroundColor: props.diskStats.map((item, index) => colors[(index + 2) % colors.length]),
++                  },
++                ],
++              }}
++              options={{
++                animation: false,
++                plugins: {
++                  legend: {
++                    display: false,
++                  },
++                  tooltip: {
++                    callbacks: {
++                      title: function (context) {
++                        const label = context[0].label || '';
++                        return label;
++                      },
++                      label: function (context) {
++                        const value = context.formattedValue || 0;
++                        return 'Total space: ' + value;
++                      },
++                    },
++                  },
++                },
++              }}
++              />
++            </ChartContainer>
++          </Grid>
+           <Grid item md={6} sm={12}>
+             <ChartContainer id='ua-space-graph' title={gettext('')} datasets={[{borderColor: '#FF6384', label: 'Used space'}, {borderColor: '#36a2eb', label: 'Available space'}]}  errorMsg={props.errorMsg} isTest={props.isTest}>
+               <BarChart data={{
+@@ -477,12 +479,14 @@ export function StorageWrapper(props) {
+                   scales: {
+                     x: {
+                       display: true,
++                      stacked: true,
+                       ticks: {
+                         display: true,
+                       },
+                     },
+                     y: {
+                       beginAtZero: true,
++                      stacked: true,
+                       ticks: {
+                         callback: function (value) {
+                           return formatBytes(value);
+@@ -500,29 +504,25 @@ export function StorageWrapper(props) {
+               />
+             </ChartContainer>
+           </Grid>
+-          <Grid item md={6} sm={12}>
+-          </Grid>
+         </Grid>
+       </Grid>
+       <Grid container spacing={1} className={classes.container}>
+-        {keys.map((key, index) => (
+-          index % 3 === 0 && (
+-            <Grid key={`disk-${index}`} container spacing={1} className={classes.container}>
+-              <Grid container spacing={1} className={classes.containerHeader}>
+-                <div className={classes.containerHeaderText}>{gettext(`Disk ${Math.floor(index / 3) + 1}`)}</div>
+-              </Grid>
+-              <Grid container spacing={1} className={classes.ioDiskContainer}>
+-                {keys.slice(index, index + 3).map((innerKey, innerKeyIndex) => (
+-                  <Grid key={`${innerKey}`} item md={4} sm={6}>
+-                    <div className={classes.chartHeader}>{innerKeyIndex==0 ? gettext('I/O operations count'): innerKeyIndex==1? gettext('Data transfer (bytes)'):gettext('Time spent in I/O operations (milliseconds)')}</div>
+-                    <ChartContainer id={`io-graph-${innerKey}`} title={gettext('')} datasets={transformData(props.ioInfo[innerKey], props.ioRefreshRate).datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+-                      <StreamingChart data={transformData(props.ioInfo[innerKey], props.ioRefreshRate)} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
+-                    </ChartContainer>
+-                  </Grid>
+-                ))}
+-              </Grid>
++        {Object.keys(props.ioInfo).map((drive, index) => (
++          <Grid key={`disk-${index}`} container spacing={1} className={classes.container}>
++            <Grid container spacing={1} className={classes.containerHeader}>
++              <div className={classes.containerHeaderText}>{gettext(drive)}</div>
++            </Grid>
++            <Grid container spacing={1} className={classes.ioDiskContainer}>
++              {Object.keys(props.ioInfo[drive]).map((type, innerKeyIndex) => (
++                <Grid key={`${type}-${innerKeyIndex}`} item md={4} sm={6}>
++                  <div className={classes.chartHeader}>{type.endsWith('_bytes_rw') ? gettext('Data transfer (bytes)'): type.endsWith('_total_rw') ? gettext('I/O operations count'): type.endsWith('_time_rw') ? gettext('Time spent in I/O operations (milliseconds)'):''}</div>
++                  <ChartContainer id={`io-graph-${type}`} title={gettext('')} datasets={transformData(props.ioInfo[drive][type], props.ioRefreshRate).datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
++                    <StreamingChart data={transformData(props.ioInfo[drive][type], props.ioRefreshRate)} dataPointSize={DATA_POINT_SIZE} xRange={X_AXIS_LENGTH} options={options} />
++                  </ChartContainer>
++                </Grid>
++              ))}
+             </Grid>
+-          )
++          </Grid>
+         ))}
+       </Grid>
+     </>
+@@ -531,10 +531,12 @@ export function StorageWrapper(props) {
+ 
+ StorageWrapper.propTypes = {
+   ioInfo: PropTypes.objectOf(
+-    PropTypes.shape({
+-      Read: PropTypes.array,
+-      Write: PropTypes.array,
+-    })
++    PropTypes.objectOf(
++      PropTypes.shape({
++        Read: PropTypes.array,
++        Write: PropTypes.array,
++      })
++    )
+   ),
+   ioRefreshRate: PropTypes.number.isRequired,
+   diskStats: PropTypes.array.isRequired,
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+index 1cda27a01..202ff7722 100644
+--- a/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Summary.jsx
+@@ -9,11 +9,9 @@ import {ChartContainer} from '../Dashboard';
+ import { Grid } from '@material-ui/core';
+ import { DATA_POINT_SIZE } from 'sources/chartjs';
+ import StreamingChart from '../../../../static/js/components/PgChart/StreamingChart';
+-import DonutChart from '../../../../static/js/components/PgChart/DonutChart';
+ import {useInterval, usePrevious} from 'sources/custom_hooks';
+ import axios from 'axios';
+-
+-export const X_AXIS_LENGTH = 75;
++import { getStatsUrl, transformData,statsReducer, X_AXIS_LENGTH } from './Utility';
+ 
+ const useStyles = makeStyles((theme) => ({
+   autoResizer: {
+@@ -50,68 +48,8 @@ const useStyles = makeStyles((theme) => ({
+   },
+ }));
+ 
+-export function transformData(labels, refreshRate) {
+-  const colors = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#8D6E63','#2196F3','#FFEB3B','#9C27B0','#00BCD4','#CDDC39'];
+-  let datasets = Object.keys(labels).map((label, i)=>{
+-    return {
+-      label: label,
+-      data: labels[label] || [],
+-      borderColor: colors[i],
+-      pointHitRadius: DATA_POINT_SIZE,
+-    };
+-  }) || [];
+-
+-  return {
+-    datasets: datasets,
+-    refreshRate: refreshRate,
+-  };
+-}
+-
+-/* URL for fetching graphs data */
+-export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
+-  let base_url = url_for('dashboard.system_statistics');
+-  base_url += '/' + sid;
+-  base_url += (did > 0) ? ('/' + did) : '';
+-  base_url += '?chart_names=' + chart_names.join(',');
+-
+-  return base_url;
+-}
+-
+-/* This will process incoming charts data add it the previous charts
+- * data to get the new state.
+- */
+-export function statsReducer(state, action) {
+-
+-  if(action.reset) {
+-    return action.reset;
+-  }
+-
+-  if(!action.incoming) {
+-    return state;
+-  }
+-
+-  if(!action.counterData) {
+-    action.counterData = action.incoming;
+-  }
+-
+-  let newState = {};
+-  Object.keys(action.incoming).forEach(label => {
+-    if(state[label]) {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-        ...state[label].slice(0, X_AXIS_LENGTH-1),
+-      ];
+-    } else {
+-      newState[label] = [
+-        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
+-      ];
+-    }
+-  });
+-  return newState;
+-}
+-
+ const chartsDefault = {
+-  'hpc_stats': {'Handle': new Array(X_AXIS_LENGTH).fill(null), 'Process': new Array(X_AXIS_LENGTH).fill(null)},
++  'hpc_stats': {'Handle': [], 'Process': []},
+ };
+ 
+ const SummaryTable = (props) => {
+@@ -148,12 +86,9 @@ export default function Summary({preferences, sid, did, pageVisible, enablePoll=
+   const [processHandleCount, processHandleCountReduce] = useReducer(statsReducer, chartsDefault['hpc_stats']);
+   const [osStats, setOsStats] = useState([]);
+   const [cpuStats, setCpuStats] = useState([]);
+-  const [processInfoStats] = useState({'Running': 4, 'Sleeping': 2, 'Stopped': 1, 'Zombie': 2});
+ 
+   const [, setCounterData] = useState({});
+-
+   const [pollDelay, setPollDelay] = useState(5000);
+-  const [longPollDelay] = useState(180000);
+   const [errorMsg, setErrorMsg] = useState(null);
+   const [chartDrawnOnce, setChartDrawnOnce] = useState(false);
+ 
+@@ -313,35 +248,6 @@ export default function Summary({preferences, sid, did, pageVisible, enablePoll=
+       });
+   }, enablePoll ? pollDelay : -1);
+ 
+-  useInterval(()=>{
+-    // let url;
+-    // url = url_for('dashboard.system_statistics');
+-    // url += '/' + sid;
+-    // url += did > 0 ? '/' + did : '';
+-    // url += '?chart_names=' + 'pi_stats';
+-    // axios.get(url)
+-    //   .then((resp)=>{
+-    //     let data = resp.data;
+-    //     console.log("pi data: ", data);
+-    //   })
+-    //   .catch((error)=>{
+-    //     if(!errorMsg) {
+-    //       if(error.response) {
+-    //         if (error.response.status === 428) {
+-    //           setErrorMsg(gettext('Please connect to the selected server to view the graph.'));
+-    //         } else {
+-    //           setErrorMsg(gettext('An error occurred whilst rendering the graph.'));
+-    //         }
+-    //       } else if(error.request) {
+-    //         setErrorMsg(gettext('Not connected to the server or the connection to the server has been closed.'));
+-    //         return;
+-    //       } else {
+-    //         console.error(error);
+-    //       }
+-    //     }
+-    //   });
+-  }, enablePoll ? longPollDelay : -1);
+-
+   return (
+     <>
+       <div data-testid='graph-poll-delay' style={{display: 'none'}}>{pollDelay}</div>
+@@ -350,7 +256,6 @@ export default function Summary({preferences, sid, did, pageVisible, enablePoll=
+           processHandleCount={transformData(processHandleCount, preferences['hpc_stats_refresh'])}
+           osStats={osStats}
+           cpuStats={cpuStats}
+-          processInfoStats={transformData(processInfoStats, 5)}
+           tableHeader={tableHeader}
+           errorMsg={errorMsg}
+           showTooltip={preferences['graph_mouse_track']}
+@@ -399,10 +304,6 @@ export function SummaryWrapper(props) {
+           <SummaryTable data={props.cpuStats} />
+         </Grid>
+         <Grid item md={6} sm={12}>
+-          <div className={classes.containerHeader}>{gettext('Process information')}</div>
+-          <ChartContainer id='pi-graph' title={gettext('')} datasets={props.processInfoStats.datasets}  errorMsg={props.errorMsg} isTest={props.isTest}>
+-            <DonutChart data={props.processInfoStats.datasets} />
+-          </ChartContainer>
+         </Grid>
+       </Grid>
+     </>
+@@ -413,7 +314,6 @@ SummaryWrapper.propTypes = {
+   processHandleCount: PropTypes.any.isRequired,
+   osStats: PropTypes.any.isRequired,
+   cpuStats: PropTypes.any.isRequired,
+-  processInfoStats: PropTypes.any.isRequired,
+   tableHeader: PropTypes.any.isRequired,
+   errorMsg: PropTypes.any,
+   showTooltip: PropTypes.bool,
+diff --git a/web/pgadmin/dashboard/static/js/SystemStats/Utility.jsx b/web/pgadmin/dashboard/static/js/SystemStats/Utility.jsx
+new file mode 100644
+index 000000000..34f370bd9
+--- /dev/null
++++ b/web/pgadmin/dashboard/static/js/SystemStats/Utility.jsx
+@@ -0,0 +1,85 @@
++import url_for from 'sources/url_for';
++import { DATA_POINT_SIZE } from 'sources/chartjs';
++
++export const X_AXIS_LENGTH = 75;
++
++/* URL for fetching graphs data */
++export function getStatsUrl(sid=-1, did=-1, chart_names=[]) {
++  let base_url = url_for('dashboard.system_statistics');
++  base_url += '/' + sid;
++  base_url += (did > 0) ? ('/' + did) : '';
++  base_url += '?chart_names=' + chart_names.join(',');
++  
++  return base_url;
++}
++
++export function transformData(labels, refreshRate) {
++  const colors = [
++    '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
++    '#FF9F40', '#8D6E63', '#2196F3', '#FFEB3B', '#9C27B0',
++    '#00BCD4', '#CDDC39', '#FF5722', '#3F51B5', '#FFC107',
++    '#607D8B', '#E91E63', '#009688', '#795548', '#FF9800'
++  ];
++  let datasets = Object.keys(labels).map((label, i)=>{
++    return {
++      label: label,
++      data: labels[label] || [],
++      borderColor: colors[i],
++      pointHitRadius: DATA_POINT_SIZE,
++    };
++  }) || [];
++  
++  return {
++    datasets: datasets,
++    refreshRate: refreshRate,
++  };
++}
++
++/* This will process incoming charts data add it the previous charts
++ * data to get the new state.
++ */
++export function statsReducer(state, action) {
++
++  if(action.reset) {
++    return action.reset;
++  }
++  
++  if(!action.incoming) {
++    return state;
++  }
++  
++  if(!action.counterData) {
++    action.counterData = action.incoming;
++  }
++  
++  let newState = {};
++  Object.keys(action.incoming).forEach(label => {
++    if(state[label]) {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++        ...state[label].slice(0, X_AXIS_LENGTH-1),
++      ];
++    } else {
++      newState[label] = [
++        action.counter ?  action.incoming[label] - action.counterData[label] : action.incoming[label],
++      ];
++    }
++  });
++  return newState;
++}
++
++export function formatBytes(bytes) {
++  if (bytes === null) {
++    return 'null';
++  }
++  
++  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
++  let unitIndex = 0;
++  
++  while (bytes >= 1000 && unitIndex < units.length - 1) {
++    bytes /= 1000;
++    unitIndex++;
++  }
++  
++  return `${bytes.toFixed(2)} ${units[unitIndex]}`;
++}
+\ No newline at end of file
+diff --git a/web/pgadmin/static/js/components/PgChart/DonutChart.jsx b/web/pgadmin/static/js/components/PgChart/DonutChart.jsx
+deleted file mode 100644
+index 4da1d4435..000000000
+--- a/web/pgadmin/static/js/components/PgChart/DonutChart.jsx
++++ /dev/null
+@@ -1,70 +0,0 @@
+-import React, { useEffect, useRef } from 'react';
+-import Chart from 'chart.js/auto';
+-import PropTypes from 'prop-types';
+-
+-export default function DonutChart({ data }) {
+-  const chartRef = useRef(null);
+-  const chartInstance = useRef(null);
+-
+-  useEffect(() => {
+-    if (data && Object.keys(data).length > 0) {
+-      if (chartInstance.current) {
+-        // If chart instance exists, update the data
+-        chartInstance.current.data.labels = data.map((item) => item.label);
+-        chartInstance.current.data.datasets[0].data = data.map((item) => item.data);
+-        chartInstance.current.update();
+-      } else {
+-        // If chart instance doesn't exist, create a new chart
+-        const chartOptions = {
+-          responsive: true,
+-          maintainAspectRatio: false,
+-          plugins: {
+-            legend: {
+-              display: false, // Hide the labels at the top
+-            },
+-          },
+-          animation: {
+-            duration: 0, // Disable the animation
+-          },
+-          tooltips: {
+-            callbacks: {
+-              label: function (tooltipItem, chartData) {
+-                const dataset = chartData.datasets[tooltipItem.datasetIndex];
+-                const total = dataset.data.reduce((previousValue, currentValue) => previousValue + currentValue);
+-                const currentValue = dataset.data[tooltipItem.index];
+-                const percentage = ((currentValue / total) * 100).toFixed(2) + '%';
+-                return dataset.label + ': ' + currentValue + ' (' + percentage + ')';
+-              },
+-            },
+-          },
+-        };
+-
+-        const chartData = {
+-          labels: data.map((item) => item.label),
+-          datasets: [
+-            {
+-              data: data.map((item) => item.data),
+-              backgroundColor: data.map((item) => item.borderColor),
+-              hoverBackgroundColor: data.map((item) => item.borderColor),
+-            },
+-          ],
+-        };
+-
+-        const ctx = chartRef.current.getContext('2d');
+-        chartInstance.current = new Chart(ctx, {
+-          type: 'doughnut',
+-          data: chartData,
+-          options: chartOptions,
+-        });
+-      }
+-    }
+-  }, [data]);
+-
+-  return (
+-    <canvas ref={chartRef} />
+-  );
+-}
+-
+-DonutChart.propTypes = {
+-  data: PropTypes.array.isRequired,
+-};
+\ No newline at end of file
+-- 
+2.41.0.windows.1
+
