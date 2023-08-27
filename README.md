@@ -1,6 +1,7 @@
 # GSoC-23
 Work I did as a part of Google Summer of Code in 2023 at PostgreSQL.
 
+Parent repository: [https://github.com/pgadmin-org/pgadmin4](https://github.com/pgadmin-org/pgadmin4)
 
 ## Description
 
@@ -29,6 +30,7 @@ Current method that is used to display tooltips involves inserting a new element
     ![image](https://github.com/pgadmin-org/pgadmin4/assets/56965873/be706bae-75f1-4178-9beb-20811238d147)
 
 - **System statistics features covered** 
+
   All the features are split into 4 different tabs with the following grouping:
 	1. **Summary**
 		  - OS information
@@ -103,7 +105,12 @@ Current method that is used to display tooltips involves inserting a new element
 - **Provided option to configure the refresh rates for the API calls** `(File > Preferences > Dashboards > Refresh rates)`
 
 - **SQL queries**
-    All the required queries are present in the `pgadmin4\web\pgadmin\dashboard\templates\dashboard\sql\default\system_statistics.sql`
+
+  All the required queries are present in the `pgadmin4\web\pgadmin\dashboard\templates\dashboard\sql\default\system_statistics.sql`
+
+- **Backend support**
+
+  All the backend related code to handle API requests and process the queries is present in the `pgadmin4\web\pgadmin\dashboard\__init__.py`
 
 ## Demo
 A small demonstration of the work can be found [here](https://drive.google.com/file/d/1gfTYx4u-G21hWCeh70UfkpcVNROHyT17/view?usp=sharing).
