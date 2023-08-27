@@ -3,6 +3,8 @@ Work I did as a part of Google Summer of Code in 2023 at PostgreSQL.
 
 Parent repository: [https://github.com/pgadmin-org/pgadmin4](https://github.com/pgadmin-org/pgadmin4)
 
+Patch file: [system_statistics.patch](https://github.com/Sahil1479/GSoC-23/blob/main/system_stats.patch)
+
 ## Description
 
 GUI representation of the system's activity using the 'system_stats' extension.
