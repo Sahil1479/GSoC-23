@@ -122,3 +122,8 @@ Current method that is used to display tooltips involves inserting a new element
 
 ## Demo
 A small demonstration of the work can be found [here](https://drive.google.com/file/d/1gfTYx4u-G21hWCeh70UfkpcVNROHyT17/view?usp=sharing).
+
+![Screenshot 2024-01-27 020609](https://github.com/Sahil1479/GSoC-23/assets/56965873/1613e378-37f1-4909-80b2-89cd3194b6f0)
+![Screenshot 2024-01-27 020626](https://github.com/Sahil1479/GSoC-23/assets/56965873/79d7a886-32cc-4b23-a7a3-309ca2e9e0bf)
+![Screenshot 2024-01-27 020639](https://github.com/Sahil1479/GSoC-23/assets/56965873/bded2e5c-d138-48da-9755-ae4e2f0b50dc)
+![Screenshot 2024-01-27 020656](https://github.com/Sahil1479/GSoC-23/assets/56965873/9f1fc9b3-f190-4904-a45b-2a06ed05c540)
